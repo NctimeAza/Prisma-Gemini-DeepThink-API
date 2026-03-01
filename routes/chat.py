@@ -103,9 +103,8 @@ def _resolve_request(
         )
         refinement_kwargs = {
             "refinement_max_rounds": ref_cfg.refinement_max_rounds,
-            "compliance_check_max_retries": ref_cfg.compliance_check_max_retries,
+            "pre_draft_review_rounds": ref_cfg.pre_draft_review_rounds,
             "enable_json_repair": ref_cfg.enable_json_repair,
-            "compliance_model": ref_cfg.compliance_model,
             "draft_model": ref_cfg.draft_model,
             "review_model": ref_cfg.review_model,
             "merge_model": ref_cfg.merge_model,

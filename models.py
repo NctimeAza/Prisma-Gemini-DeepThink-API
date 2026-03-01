@@ -19,7 +19,8 @@ ThinkingLevel = Literal["minimal", "low", "medium", "high"]
 PipelineMode = Literal["classic", "refinement"]
 RefinementPhase = Literal[
     "planning",  # 规划阶段
-    "experts",  # 精修专家并行执行 + 规范审核
+    "experts",  # 精修专家并行执行
+    "pre_draft_review",  # 初稿前额外审核
     "draft",  # 初稿生成
     "review",  # 审查初稿
     "improvers",  # 改进专家并行执行
@@ -115,9 +116,8 @@ class DeepThinkConfig(BaseModel):
     synthesis_temperature: Optional[float] = None
     # --- 精修流程专用配置 ---
     refinement_max_rounds: int = 2  # 精修迭代轮数
-    compliance_check_max_retries: int = 1  # 基本规范审核最大重试轮数
+    pre_draft_review_rounds: int = 1  # 初稿前额外审核轮数（0 表示禁用）
     enable_json_repair: bool = False  # 是否启用 JSON 格式修复小模型
-    compliance_model: Optional[str] = None  # 规范审核小模型
     draft_model: Optional[str] = None  # 初稿生成模型
     review_model: Optional[str] = None  # 审查阶段模型
     merge_model: Optional[str] = None  # 综合助手模型
@@ -175,13 +175,6 @@ class RefinementExpertConfig(BaseModel):
     temperature: float = 1.0
     # 运行时注入，规划阶段无需填写
     all_expert_roles: list[str] = Field(default_factory=list)
-
-
-class ComplianceCheckResult(BaseModel):
-    """专家基本规范审核结果."""
-
-    passed: bool
-    reason: str = ""
 
 
 class DraftLine(BaseModel):

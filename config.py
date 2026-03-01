@@ -1,4 +1,4 @@
-"""Prisma DeepThink 配置模块.
+﻿"""Prisma DeepThink 配置模块.
 
 模型注册表、Thinking Budget 计算、环境变量加载。
 通过虚拟模型名（如 gemini-3-pro-deepthink-high）映射到实际模型 + 思考预算。
@@ -250,13 +250,12 @@ class VirtualModel:
     synthesis_temperature: Optional[float] = None
     # --- 精修流程专用字段 ---
     mode: str = "classic"  # "classic" 或 "refinement"
-    compliance_model: Optional[str] = None  # 专家规范审核小模型
     draft_model: Optional[str] = None  # 初稿生成模型
     review_model: Optional[str] = None  # 审查阶段模型
     merge_model: Optional[str] = None  # 综合助手模型
     json_repair_model: Optional[str] = None  # JSON 修复模型
     refinement_max_rounds: int = 2  # 精修最大迭代轮数
-    compliance_check_max_retries: int = 1  # 规范审核重试次数
+    pre_draft_review_rounds: int = 1  # pre-draft review rounds (0=disabled)
     enable_json_repair: bool = False  # 是否启用 JSON 修复
 
 
@@ -367,49 +366,94 @@ VIRTUAL_MODELS: list[VirtualModel] = [
     #     "real_model": "gemini-3.1-pro-preview",
     #     "manager_model": "gemini-3.1-pro-preview",
     #     "synthesis_model": "gemini-3.1-pro-preview",
-    #     "compliance_model": "gemini-3-flash-preview",
     #     "json_repair_model": "gemini-3-flash-preview",
     #     "mode": "refinement",
     #     "planning_level": "high",
     #     "expert_level": "high",
     #     "synthesis_level": "high",
     #     "refinement_max_rounds": 2,
-    #     "compliance_check_max_retries": 1,
+    #     "pre_draft_review_rounds": 1,
     #     "enable_json_repair": false,
     #     "max_rounds": 1,
     #     "desc": "3.1 Pro 精修流程实验模式，侧重写作精修改进"
     # }
     VirtualModel(
-        id="gemini-3.1-pro-refinement-medium",
+        id="gemini-3.1-pro-deepthink-refinement-low",
         real_model="gemini-3.1-pro-preview",
         manager_model="gemini-3.1-pro-preview",
         synthesis_model="gemini-3.1-pro-preview",
-        compliance_model="gemini-3-flash-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=1,
+        pre_draft_review_rounds=0,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-refinement-medium",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
         json_repair_model="gemini-3-flash-preview",
         mode="refinement",
         planning_level="high",
         expert_level="high",
         synthesis_level="high",
         refinement_max_rounds=2,
-        compliance_check_max_retries=0,
+        pre_draft_review_rounds=1,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-refinement-high",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=3,
+        pre_draft_review_rounds=2,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-refinement-extra",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=4,
+        pre_draft_review_rounds=3,
         enable_json_repair=False,
         max_rounds=1,
         desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
     ),
     # 快速精修测试flash
     VirtualModel(
-        id="gemini-3-flash-refinement-medium",
+        id="gemini-3-flash-deepthink-refinement-medium",
         real_model="gemini-3-flash-preview",
         manager_model="gemini-3-flash-preview",
         synthesis_model="gemini-3-flash-preview",
-        compliance_model="gemini-3-flash-preview",
         json_repair_model="gemini-3-flash-preview",
         mode="refinement",
         planning_level="high",
         expert_level="high",
         synthesis_level="high",
         refinement_max_rounds=2,
-        compliance_check_max_retries=0,
+        pre_draft_review_rounds=1,
         enable_json_repair=False,
         max_rounds=1,
         desc="3.1 Flash 精修流程实验模式，侧重写作精修改进"
@@ -525,15 +569,12 @@ def _load_extra_virtual_models() -> list[VirtualModel]:
                 review_temperature=item.get("review_temperature"),
                 synthesis_temperature=item.get("synthesis_temperature"),
                 mode=item.get("mode", "classic"),
-                compliance_model=item.get("compliance_model"),
                 draft_model=item.get("draft_model"),
                 review_model=item.get("review_model"),
                 merge_model=item.get("merge_model"),
                 json_repair_model=item.get("json_repair_model"),
                 refinement_max_rounds=item.get("refinement_max_rounds", 2),
-                compliance_check_max_retries=item.get(
-                    "compliance_check_max_retries", 1
-                ),
+                pre_draft_review_rounds=item.get("pre_draft_review_rounds", 1),
                 enable_json_repair=item.get("enable_json_repair", False),
             )
             models.append(vm)
@@ -649,14 +690,12 @@ def resolve_model(model_id: str) -> _ResolveResult:
 @dataclass
 class RefinementModelConfig:
     """精修流程各阶段模型配置."""
-
-    compliance_model: str  # 规范审核模型
     draft_model: str       # 初稿生成模型
     review_model: str      # 审查模型
     merge_model: str       # 综合助手模型
     json_repair_model: str  # JSON 修复模型
     refinement_max_rounds: int = 2
-    compliance_check_max_retries: int = 1
+    pre_draft_review_rounds: int = 1  # pre-draft review rounds (0=disabled)
     enable_json_repair: bool = False
 
 
@@ -682,21 +721,20 @@ def resolve_refinement_config(
 
     if vm:
         return RefinementModelConfig(
-            compliance_model=vm.compliance_model or default_small,
             draft_model=vm.draft_model or real_model,
             review_model=vm.review_model or mgr_model,
             merge_model=vm.merge_model or syn_model,
             json_repair_model=vm.json_repair_model or default_small,
             refinement_max_rounds=vm.refinement_max_rounds,
-            compliance_check_max_retries=vm.compliance_check_max_retries,
+            pre_draft_review_rounds=vm.pre_draft_review_rounds,
             enable_json_repair=vm.enable_json_repair,
         )
 
     return RefinementModelConfig(
-        compliance_model=default_small,
         draft_model=real_model,
         review_model=mgr_model,
         merge_model=syn_model,
         json_repair_model=default_small,
     )
+
 

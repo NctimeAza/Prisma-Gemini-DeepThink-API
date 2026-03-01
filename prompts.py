@@ -651,25 +651,6 @@ REFINEMENT_EXPERT_INJECTION: str = _load_prompt(
     "REFINEMENT_EXPERT_INJECTION", _DEFAULT_REFINEMENT_EXPERT_INJECTION
 )
 
-# --- 基本规范审核 ---
-
-_DEFAULT_COMPLIANCE_CHECK_PROMPT = (
-    "你是简洁的质量检查员。请检查以下专家回复是否符合基本规范：\n"
-    "1. 有无无意义的寒暄、客套话、自我介绍、\"好的！\"之类的开场白？\n"
-    "2. 是否做到了 prompt 要求做的事情并直入主题给出必要的回复？\n"
-    "3. 回复内容是否与专家被分配的领域相关？\n\n"
-    "如果存在以上问题，返回 {{\"passed\": false, \"reason\": \"具体原因\"}}\n"
-    "如果没有问题，返回 {{\"passed\": true}}\n\n"
-    "专家角色：{role}\n"
-    "专家领域：{domain}\n"
-    "专家原始任务：{task}\n\n"
-    "专家回复内容：\n{content}"
-)
-
-COMPLIANCE_CHECK_PROMPT: str = _load_prompt(
-    "COMPLIANCE_CHECK_PROMPT", _DEFAULT_COMPLIANCE_CHECK_PROMPT
-)
-
 # --- 初稿生成 ---
 
 _DEFAULT_REFINEMENT_DRAFT_PROMPT = (
@@ -700,7 +681,9 @@ _DEFAULT_REFINEMENT_REVIEW_PROMPT = (
     "- 每个改进专家也需要注入当前所有已分配改进专家的信息，严格规定其职责范围。\n"
     "- 分配改进专家时，尽量减少职责重叠；除非确有必要，不要让多个专家同时修改同一行或同一小段内容。\n"
     "- 给每个改进专家的 prompt 应尽量写清优先处理的问题或行段，避免“泛化重写全文”式任务。\n"
-    "- 改进专家只能通过 modify（修改行）、add（在行后添加）、remove（删除行）操作来修改初稿。\n\n"
+    "- 改进专家只能通过 modify（修改行）、add（在行后添加）、remove（删除行）操作来修改初稿。\n"
+    "- 每个专家包含：role（纯中文或纯英文，不带括号注释）、domain（严格负责领域）、temperature（0.0-1.25）、prompt（具体任务指令）。\n"
+    "- 温度分配参考：创意写作/翻译类推荐1.1+，分析/资料类推荐0.4-1.0，精确任务0.0-0.4。\n\n"    
     "{iteration_note}\n\n"
     "输出 JSON 格式：\n"
     "{{\n"
@@ -808,27 +791,43 @@ MSG_REFINEMENT_EXPERT_DONE: str = _load_prompt(
     ),
 )
 
-MSG_REFINEMENT_COMPLIANCE_CHECK: str = _load_prompt(
-    "MSG_REFINEMENT_COMPLIANCE_CHECK",
+MSG_REFINEMENT_PRE_DRAFT_REVIEW_START: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_REVIEW_START",
     _select_runtime_text(
-        "正在审核专家「{expert_name}」的回复规范。",
-        'Checking compliance for expert "{expert_name}".',
+        "正在初稿前审查专家结果（第 {round} 轮）。",
+        "Pre-draft review of expert outputs (round {round}).",
     ),
 )
 
-MSG_REFINEMENT_COMPLIANCE_FAILED: str = _load_prompt(
-    "MSG_REFINEMENT_COMPLIANCE_FAILED",
+MSG_REFINEMENT_PRE_DRAFT_REVIEW_APPROVED: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_REVIEW_APPROVED",
     _select_runtime_text(
-        "专家「{expert_name}」规范审核未通过：{reason}。正在重新生成。",
-        'Expert "{expert_name}" failed compliance: {reason}. Regenerating.',
+        "初稿前审查通过，开始生成初稿。",
+        "Pre-draft review approved. Proceeding to draft generation.",
     ),
 )
 
-MSG_REFINEMENT_COMPLIANCE_PASSED: str = _load_prompt(
-    "MSG_REFINEMENT_COMPLIANCE_PASSED",
+MSG_REFINEMENT_PRE_DRAFT_REVIEW_REJECTED_REASON: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_REVIEW_REJECTED_REASON",
     _select_runtime_text(
-        "专家「{expert_name}」规范审核通过。",
-        'Expert "{expert_name}" passed compliance check.',
+        "初稿前审查未通过，驳回理由：{reason}",
+        "Pre-draft review rejected. Reason: {reason}",
+    ),
+)
+
+MSG_REFINEMENT_PRE_DRAFT_ROUND_ASSIGNED: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_ROUND_ASSIGNED",
+    _select_runtime_text(
+        "初稿前第 {round} 轮分配了 {count} 位专家：{names}",
+        "Pre-draft round {round} assigned {count} experts: {names}",
+    ),
+)
+
+MSG_REFINEMENT_PRE_DRAFT_NEXT_ROUND: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_NEXT_ROUND",
+    _select_runtime_text(
+        "进入初稿前第 {round} 轮审查。",
+        "Starting pre-draft review round {round}.",
     ),
 )
 

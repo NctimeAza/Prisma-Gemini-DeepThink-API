@@ -29,6 +29,7 @@ from config import (
     MAX_CONTEXT_MESSAGES,
     SSE_HEARTBEAT_INTERVAL,
     resolve_model,
+    resolve_refinement_config,
 )
 from engine.checkpoint_store import CheckpointStore
 from engine.orchestrator import run_deep_think
@@ -52,6 +53,49 @@ def _resume_hint(resume_id: str) -> str:
         f"[resume_id] {resume_id}\n"
         f"{RESUME_HINT_TEXT.format(command=_CONTINUE_COMMAND, resume_id=resume_id)}\n"
     )
+
+
+def _resolve_request_config(
+    model_id: str,
+) -> tuple[str, str, str, DeepThinkConfig, str]:
+    (
+        real_model, mgr_model, syn_model,
+        p_level, e_level, s_level,
+        model_max_rounds, provider,
+        planning_temp, expert_temp, review_temp, synthesis_temp,
+        mode,
+    ) = resolve_model(model_id)
+
+    refinement_kwargs: dict[str, Any] = {}
+    if mode == "refinement":
+        ref_cfg = resolve_refinement_config(
+            model_id, real_model, mgr_model, syn_model,
+        )
+        refinement_kwargs = {
+            "refinement_max_rounds": ref_cfg.refinement_max_rounds,
+            "pre_draft_review_rounds": ref_cfg.pre_draft_review_rounds,
+            "enable_json_repair": ref_cfg.enable_json_repair,
+            "draft_model": ref_cfg.draft_model,
+            "review_model": ref_cfg.review_model,
+            "merge_model": ref_cfg.merge_model,
+            "json_repair_model": ref_cfg.json_repair_model,
+        }
+
+    config = DeepThinkConfig(
+        mode=mode,
+        planning_level=p_level,
+        expert_level=e_level,
+        synthesis_level=s_level,
+        enable_recursive_loop=ENABLE_RECURSIVE_LOOP,
+        max_rounds=model_max_rounds,
+        max_context_messages=MAX_CONTEXT_MESSAGES,
+        planning_temperature=planning_temp,
+        expert_temperature=expert_temp,
+        review_temperature=review_temp,
+        synthesis_temperature=synthesis_temp,
+        **refinement_kwargs,
+    )
+    return real_model, mgr_model, syn_model, config, provider
 
 
 # ---------------------------------------------------------------------------
@@ -269,24 +313,8 @@ async def _gemini_sse_stream(
         yield f"data: {json.dumps({'error': 'empty query'})}\n\n"
         return
 
-    (
-        real_model, mgr_model, syn_model,
-        p_level, e_level, s_level,
-        model_max_rounds, provider,
-        planning_temp, expert_temp, review_temp, synthesis_temp,
-    ) = resolve_model(model_id)
-
-    config = DeepThinkConfig(
-        planning_level=p_level,
-        expert_level=e_level,
-        synthesis_level=s_level,
-        enable_recursive_loop=ENABLE_RECURSIVE_LOOP,
-        max_rounds=model_max_rounds,
-        max_context_messages=MAX_CONTEXT_MESSAGES,
-        planning_temperature=planning_temp,
-        expert_temperature=expert_temp,
-        review_temperature=review_temp,
-        synthesis_temperature=synthesis_temp,
+    real_model, mgr_model, syn_model, config, provider = _resolve_request_config(
+        model_id
     )
 
     checkpoint_store = CheckpointStore()
@@ -304,6 +332,7 @@ async def _gemini_sse_stream(
     checkpoint.current_round = 1
     checkpoint.started_at = now
     checkpoint.updated_at = now
+    checkpoint.pipeline_mode = config.mode
     checkpoint_store.save(checkpoint)
 
     async def _persist_event(_: str, __: dict) -> None:
@@ -420,24 +449,8 @@ async def generate_content(model_name: str, raw_request: Request):
             content={"error": {"message": "empty query", "code": 400}},
         )
 
-    (
-        real_model, mgr_model, syn_model,
-        p_level, e_level, s_level,
-        model_max_rounds, provider,
-        planning_temp, expert_temp, review_temp, synthesis_temp,
-    ) = resolve_model(model_id)
-
-    config = DeepThinkConfig(
-        planning_level=p_level,
-        expert_level=e_level,
-        synthesis_level=s_level,
-        enable_recursive_loop=ENABLE_RECURSIVE_LOOP,
-        max_rounds=model_max_rounds,
-        max_context_messages=MAX_CONTEXT_MESSAGES,
-        planning_temperature=planning_temp,
-        expert_temperature=expert_temp,
-        review_temperature=review_temp,
-        synthesis_temperature=synthesis_temp,
+    real_model, mgr_model, syn_model, config, provider = _resolve_request_config(
+        model_id
     )
 
     checkpoint_store = CheckpointStore()
@@ -455,6 +468,7 @@ async def generate_content(model_name: str, raw_request: Request):
     checkpoint.current_round = 1
     checkpoint.started_at = now
     checkpoint.updated_at = now
+    checkpoint.pipeline_mode = config.mode
     checkpoint_store.save(checkpoint)
 
     async def _persist_event(_: str, __: dict) -> None:

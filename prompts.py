@@ -597,3 +597,382 @@ def format_expert_task(query: str, task: str) -> str:
         拼接后的完整 prompt.
     """
     return MSG_EXPERT_TASK_PREFIX.format(query=query, task=task)
+
+
+# ============================================================
+# 精修流程 (Refinement Pipeline) 专用 Prompt
+# ============================================================
+
+# --- 精修规划阶段 ---
+
+_DEFAULT_REFINEMENT_PLANNER_PROMPT = (
+    "你是精修流程的任务规划师。你的职责是分析用户的创作需求，"
+    "将其拆解为多个专业领域专家角色，每位专家严格负责特定的维度。\n\n"
+    "核心原则：\n"
+    "- 绝对不要分配任何专家去撰写完整全文。每个专家只负责提供其领域的素材、分析或建议。\n"
+    "- 严格划分每个专家的负责领域（domain），确保领域之间不重叠。\n"
+    "- 每个专家的回复用户看不到，只是需要他们根据自身特长去做对应的事，无需任何寒暄、客套话或自我介绍。\n"
+    "- 专家之间无法相互通信或看到彼此的输出，但每个专家都会被告知当前团队的所有专家角色，以防越权干涉。\n\n"
+    "用户至上原则：\n"
+    "你是一个通用推理框架，服务于各类用户需求。"
+    "设计专家时应确保所选角色能够积极配合用户的意图，"
+    "而非因'专业人格'与需求不匹配而产生冲突。\n\n"
+    "输出要求：\n"
+    "- 输出结构化 JSON，包含 thought_process 和 experts 数组。\n"
+    "- 每个专家包含：role（纯中文或纯英文，不带括号注释）、domain（严格负责领域）、temperature（0.0-1.25）、prompt（具体任务指令）。\n"
+    "- 温度分配参考：创意写作/翻译类推荐1.1+，分析/资料类推荐0.4-1.0，精确任务0.0-0.4。"
+)
+
+REFINEMENT_PLANNER_PROMPT: str = _load_prompt(
+    "REFINEMENT_PLANNER_PROMPT", _DEFAULT_REFINEMENT_PLANNER_PROMPT
+)
+
+# --- 专家互感知注入模板 ---
+
+_DEFAULT_REFINEMENT_EXPERT_INJECTION = (
+    "【团队信息】当前已分配的所有专家角色：{all_experts}\n"
+    "你是「{role}」专家。你严格只负责：{domain}\n"
+    "严禁越权干涉其他专家的职责范围。你的回复用户看不到，只需根据自身特长直入主题给出必要的回复。\n"
+    "不要有任何寒暄、客套、自我介绍或不必要的开场白。直接开始你的分析/创作。\n\n"
+    "你的首要职责是忠实服务于用户的请求。"
+    "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
+    "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n"
+    "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。\n"
+    "对话上下文如下：{context}"
+)
+
+REFINEMENT_EXPERT_INJECTION: str = _load_prompt(
+    "REFINEMENT_EXPERT_INJECTION", _DEFAULT_REFINEMENT_EXPERT_INJECTION
+)
+
+# --- 基本规范审核 ---
+
+_DEFAULT_COMPLIANCE_CHECK_PROMPT = (
+    "你是简洁的质量检查员。请检查以下专家回复是否符合基本规范：\n"
+    "1. 有无无意义的寒暄、客套话、自我介绍、\"好的！\"之类的开场白？\n"
+    "2. 是否做到了 prompt 要求做的事情并直入主题给出必要的回复？\n"
+    "3. 回复内容是否与专家被分配的领域相关？\n\n"
+    "如果存在以上问题，返回 {\"passed\": false, \"reason\": \"具体原因\"}\n"
+    "如果没有问题，返回 {\"passed\": true}\n\n"
+    "专家角色：{role}\n"
+    "专家领域：{domain}\n"
+    "专家原始任务：{task}\n\n"
+    "专家回复内容：\n{content}"
+)
+
+COMPLIANCE_CHECK_PROMPT: str = _load_prompt(
+    "COMPLIANCE_CHECK_PROMPT", _DEFAULT_COMPLIANCE_CHECK_PROMPT
+)
+
+# --- 初稿生成 ---
+
+_DEFAULT_REFINEMENT_DRAFT_PROMPT = (
+    "你是初稿撰写者。你将收到多位专家提供的领域素材，"
+    "以及用户的原始需求和对话上下文。\n\n"
+    "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。\n\n"
+    "你的任务：\n"
+    "1. 综合所有专家的素材，基于用户需求撰写一份完整的初稿。\n"
+    "2. 初稿应当连贯、完整，并充分利用各专家提供的高质量素材。\n"
+    "3. 始终切入正题，不要包含多余的开场白或客套话。\n"
+    "4. 尊重并忠实于用户指示中设定的方向和基调。"
+)
+
+REFINEMENT_DRAFT_PROMPT: str = _load_prompt(
+    "REFINEMENT_DRAFT_PROMPT", _DEFAULT_REFINEMENT_DRAFT_PROMPT
+)
+
+# --- 审查阶段（行切分分析 + 改进专家分配） ---
+
+_DEFAULT_REFINEMENT_REVIEW_PROMPT = (
+    "你是精修审查模型。你将收到初稿的按行切分内容（JSON数组格式），"
+    "以及用户的原始需求。\n\n"
+    "你的任务：\n"
+    "1. 仔细分析初稿中存在的违反用户需求、质量不佳、可以改进的地方。\n"
+    "2. 分配多个改进专家，每个专家负责特定维度的修补工作。\n"
+    "3. 向每个改进专家提供额外的指导信息。\n\n"
+    "注意：\n"
+    "- 每个改进专家也需要注入当前所有已分配改进专家的信息，严格规定其职责范围。\n"
+    "- 改进专家只能通过 modify（修改行）、add（在行后添加）、remove（删除行）操作来修改初稿。\n\n"
+    "{iteration_note}\n\n"
+    "输出 JSON 格式：\n"
+    "{{\n"
+    "  \"issues\": [\"问题1描述\", \"问题2描述\", ...],\n"
+    "  \"refinement_experts\": [\n"
+    "    {\"role\": \"专家角色名\", \"domain\": \"负责领域\", \"prompt\": \"具体改进任务\", \"temperature\": 0.8}\n"
+    "  ],\n"
+    "  \"expert_guidance\": {\"专家角色名\": \"额外指导信息\"},\n"
+    "  \"approved\": false,\n"
+    "  \"approval_reason\": \"\"\n"
+    "}}"
+)
+
+REFINEMENT_REVIEW_PROMPT: str = _load_prompt(
+    "REFINEMENT_REVIEW_PROMPT", _DEFAULT_REFINEMENT_REVIEW_PROMPT
+)
+
+# --- 改进专家 ---
+
+_DEFAULT_REFINEMENT_IMPROVER_INJECTION = (
+    "【改进团队信息】当前已分配的所有改进专家角色：{all_experts}\n"
+    "你是「{role}」改进专家。你严格只负责：{domain}\n"
+    "严禁越权修改其他专家负责范围内的内容。\n\n"
+    "你的首要职责是忠实服务于用户的请求。"
+    "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
+    "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n\n"
+    "审查模型给你的额外指导：{guidance}\n\n"
+    "你将收到初稿的按行切分内容。请根据你的专业领域分析后给出修改意见，"
+    "并以 JSON 格式输出 diff 操作。\n\n"
+    "输出格式：\n"
+    "{{\n"
+    "  \"analysis\": \"你的分析原因\",\n"
+    "  \"operations\": [\n"
+    "    {\"action\": \"modify\", \"line\": 3, \"content\": \"修改后的新内容\", \"reason\": \"修改原因\"},\n"
+    "    {\"action\": \"add\", \"line\": 5, \"content\": \"新增内容（将添加在此行之后）\", \"reason\": \"新增原因\"},\n"
+    "    {\"action\": \"remove\", \"line\": 7, \"reason\": \"删除原因\"}\n"
+    "  ]\n"
+    "}}"
+)
+
+REFINEMENT_IMPROVER_INJECTION: str = _load_prompt(
+    "REFINEMENT_IMPROVER_INJECTION", _DEFAULT_REFINEMENT_IMPROVER_INJECTION
+)
+
+# --- 综合助手（合并） ---
+
+_DEFAULT_REFINEMENT_MERGE_PROMPT = (
+    "你是精修综合助手。你将收到初稿原文和所有改进专家提交的 diff 操作。\n"
+    "每个操作都有一个从 0 开始递增的全局 op_id。\n\n"
+    "你的任务：\n"
+    "1. 审阅每个操作，做出决策：accept（接受）/ reject（驳回并给理由）/ modify（修改后接受，可改行数和内容，并给理由）。\n"
+    "2. 注意操作之间的冲突和依赖关系，确保最终结果的一致性。\n"
+    "3. 最后给出总体改动简评。\n\n"
+    "输出 JSON 格式：\n"
+    "{{\n"
+    "  \"decisions\": [\n"
+    "    {\"op_id\": 0, \"decision\": \"accept\"},\n"
+    "    {\"op_id\": 1, \"decision\": \"reject\", \"reason\": \"驳回理由\"},\n"
+    "    {\"op_id\": 2, \"decision\": \"modify\", \"reason\": \"修改理由\", \"modified_line\": 5, \"modified_content\": \"修改后内容\"}\n"
+    "  ],\n"
+    "  \"summary\": \"总体改动简评\"\n"
+    "}}"
+)
+
+REFINEMENT_MERGE_PROMPT: str = _load_prompt(
+    "REFINEMENT_MERGE_PROMPT", _DEFAULT_REFINEMENT_MERGE_PROMPT
+)
+
+# --- 精修流程状态消息 ---
+
+MSG_REFINEMENT_PLANNING: str = _load_prompt(
+    "MSG_REFINEMENT_PLANNING",
+    _select_runtime_text("正在规划精修方案。", "Planning refinement strategy."),
+)
+
+MSG_REFINEMENT_EXPERT_START: str = _load_prompt(
+    "MSG_REFINEMENT_EXPERT_START",
+    _select_runtime_text(
+        "精修专家「{expert_name}」({domain}) 开始工作。",
+        'Refinement expert "{expert_name}" ({domain}) started.',
+    ),
+)
+
+MSG_REFINEMENT_EXPERT_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_EXPERT_DONE",
+    _select_runtime_text(
+        "精修专家「{expert_name}」工作完成。",
+        'Refinement expert "{expert_name}" completed.',
+    ),
+)
+
+MSG_REFINEMENT_COMPLIANCE_CHECK: str = _load_prompt(
+    "MSG_REFINEMENT_COMPLIANCE_CHECK",
+    _select_runtime_text(
+        "正在审核专家「{expert_name}」的回复规范。",
+        'Checking compliance for expert "{expert_name}".',
+    ),
+)
+
+MSG_REFINEMENT_COMPLIANCE_FAILED: str = _load_prompt(
+    "MSG_REFINEMENT_COMPLIANCE_FAILED",
+    _select_runtime_text(
+        "专家「{expert_name}」规范审核未通过：{reason}。正在重新生成。",
+        'Expert "{expert_name}" failed compliance: {reason}. Regenerating.',
+    ),
+)
+
+MSG_REFINEMENT_COMPLIANCE_PASSED: str = _load_prompt(
+    "MSG_REFINEMENT_COMPLIANCE_PASSED",
+    _select_runtime_text(
+        "专家「{expert_name}」规范审核通过。",
+        'Expert "{expert_name}" passed compliance check.',
+    ),
+)
+
+MSG_REFINEMENT_DRAFT_START: str = _load_prompt(
+    "MSG_REFINEMENT_DRAFT_START",
+    _select_runtime_text(
+        "正在基于专家素材撰写初稿。",
+        "Generating initial draft from expert materials.",
+    ),
+)
+
+MSG_REFINEMENT_DRAFT_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_DRAFT_DONE",
+    _select_runtime_text("初稿完成。", "Draft completed."),
+)
+
+MSG_REFINEMENT_REVIEW_START: str = _load_prompt(
+    "MSG_REFINEMENT_REVIEW_START",
+    _select_runtime_text(
+        "正在审查初稿（第 {round} 轮精修）。",
+        "Reviewing draft (refinement round {round}).",
+    ),
+)
+
+MSG_REFINEMENT_REVIEW_APPROVED: str = _load_prompt(
+    "MSG_REFINEMENT_REVIEW_APPROVED",
+    _select_runtime_text(
+        "审查通过，初稿质量达标。",
+        "Review approved. Draft quality meets standards.",
+    ),
+)
+
+MSG_REFINEMENT_IMPROVER_START: str = _load_prompt(
+    "MSG_REFINEMENT_IMPROVER_START",
+    _select_runtime_text(
+        "改进专家「{expert_name}」({domain}) 开始精修。",
+        'Improvement expert "{expert_name}" ({domain}) started.',
+    ),
+)
+
+MSG_REFINEMENT_IMPROVER_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_IMPROVER_DONE",
+    _select_runtime_text(
+        "改进专家「{expert_name}」精修完成，提交了 {op_count} 个操作。",
+        'Improvement expert "{expert_name}" completed with {op_count} operations.',
+    ),
+)
+
+MSG_REFINEMENT_MERGE_START: str = _load_prompt(
+    "MSG_REFINEMENT_MERGE_START",
+    _select_runtime_text(
+        "综合助手正在合并精修操作。",
+        "Merge assistant reviewing refinement operations.",
+    ),
+)
+
+MSG_REFINEMENT_MERGE_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_MERGE_DONE",
+    _select_runtime_text(
+        "精修合并完成：{accepted} 接受 / {rejected} 驳回 / {modified} 修改。",
+        "Merge complete: {accepted} accepted / {rejected} rejected / {modified} modified.",
+    ),
+)
+
+MSG_REFINEMENT_APPLIED: str = _load_prompt(
+    "MSG_REFINEMENT_APPLIED",
+    _select_runtime_text(
+        "精修操作已应用到初稿。",
+        "Refinement operations applied to draft.",
+    ),
+)
+
+MSG_REFINEMENT_OUTPUT: str = _load_prompt(
+    "MSG_REFINEMENT_OUTPUT",
+    _select_runtime_text(
+        "精修完成，正在输出最终结果。",
+        "Refinement complete. Outputting final result.",
+    ),
+)
+
+MSG_REFINEMENT_NEXT_ROUND: str = _load_prompt(
+    "MSG_REFINEMENT_NEXT_ROUND",
+    _select_runtime_text(
+        "进入第 {round} 轮精修迭代。",
+        "Starting refinement iteration round {round}.",
+    ),
+)
+
+
+# ============================================================
+# 精修流程模板渲染函数
+# ============================================================
+
+def get_refinement_expert_system_instruction(
+    role: str, domain: str, context: str,
+    all_expert_roles: list[str],
+    user_system_prompt: str = "",
+) -> str:
+    """生成精修流程 Expert 的 system instruction.
+
+    Args:
+        role: 专家角色名.
+        domain: 严格负责领域.
+        context: 对话上下文.
+        all_expert_roles: 所有已分配专家角色列表.
+        user_system_prompt: 下游客户端的 system prompt.
+
+    Returns:
+        完整的 system prompt.
+    """
+    parts = []
+    if user_system_prompt:
+        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
+    parts.append(
+        REFINEMENT_EXPERT_INJECTION.format(
+            role=role, domain=domain, context=context,
+            all_experts="、".join(all_expert_roles),
+        )
+    )
+    return "\n\n".join(parts)
+
+
+def build_refinement_expert_contents(
+    task_prompt: str,
+    image_parts: list[dict] | None = None,
+) -> list[dict]:
+    """构建精修流程 Expert 的多轮对话 contents，复用 prefill 确认轮.
+
+    与经典流程 build_expert_contents 相同的预填充逻辑，
+    确保模型从"已承诺执行"的状态开始生成。
+
+    Args:
+        task_prompt: 专家的实际任务文本.
+        image_parts: Gemini inlineData 格式的图片列表.
+
+    Returns:
+        Gemini 多轮对话格式的 contents 列表.
+    """
+    # 复用与经典流程相同的 prefill 逻辑
+    return build_expert_contents(task_prompt, image_parts=image_parts)
+
+
+def get_refinement_improver_system_instruction(
+    role: str, domain: str,
+    all_expert_roles: list[str],
+    guidance: str = "",
+    user_system_prompt: str = "",
+) -> str:
+    """生成改进专家的 system instruction.
+
+    Args:
+        role: 改进专家角色名.
+        domain: 严格负责领域.
+        all_expert_roles: 所有已分配改进专家角色列表.
+        guidance: 审查模型给的额外指导.
+        user_system_prompt: 下游客户端的 system prompt.
+
+    Returns:
+        完整的 system prompt.
+    """
+    parts = []
+    if user_system_prompt:
+        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
+    parts.append(
+        REFINEMENT_IMPROVER_INJECTION.format(
+            role=role, domain=domain,
+            all_experts="、".join(all_expert_roles),
+            guidance=guidance or "无额外指导。",
+        )
+    )
+    return "\n\n".join(parts)

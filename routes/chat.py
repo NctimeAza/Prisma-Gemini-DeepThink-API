@@ -83,12 +83,32 @@ def _resolve_request(
         p_level, e_level, s_level,
         model_max_rounds, provider,
         planning_temp, expert_temp, review_temp, synthesis_temp,
+        mode,
     ) = resolve_model(request.model)
 
     if request.prisma_config:
         return real_model, mgr_model, syn_model, request.prisma_config, provider
 
+    # 精修流程额外配置
+    refinement_kwargs: dict = {}
+    if mode == "refinement":
+        from config import resolve_refinement_config
+        ref_cfg = resolve_refinement_config(
+            request.model, real_model, mgr_model, syn_model,
+        )
+        refinement_kwargs = {
+            "refinement_max_rounds": ref_cfg.refinement_max_rounds,
+            "compliance_check_max_retries": ref_cfg.compliance_check_max_retries,
+            "enable_json_repair": ref_cfg.enable_json_repair,
+            "compliance_model": ref_cfg.compliance_model,
+            "draft_model": ref_cfg.draft_model,
+            "review_model": ref_cfg.review_model,
+            "merge_model": ref_cfg.merge_model,
+            "json_repair_model": ref_cfg.json_repair_model,
+        }
+
     config = DeepThinkConfig(
+        mode=mode,
         planning_level=p_level,
         expert_level=e_level,
         synthesis_level=s_level,
@@ -99,6 +119,7 @@ def _resolve_request(
         expert_temperature=expert_temp,
         review_temperature=review_temp,
         synthesis_temperature=synthesis_temp,
+        **refinement_kwargs,
     )
     return real_model, mgr_model, syn_model, config, provider
 
@@ -457,6 +478,21 @@ async def chat_completions(raw_request: Request):
             checkpoint.output_content = ""
 
         replay_only = checkpoint.status == "completed"
+
+        # 禁止跨模式 continue
+        if checkpoint.pipeline_mode != config.mode:
+            await _release_resume_id(checkpoint.resume_id)
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"pipeline mode mismatch: checkpoint was created with "
+                        f"mode='{checkpoint.pipeline_mode}' but current model uses "
+                        f"mode='{config.mode}'. Cannot resume across different modes."
+                    )
+                },
+            )
+
         checkpoint.request_model = request.model
         checkpoint.real_model = real_model
         checkpoint.manager_model = mgr_model
@@ -486,6 +522,7 @@ async def chat_completions(raw_request: Request):
         checkpoint.started_at = now
         checkpoint.updated_at = now
         checkpoint.completed_at = None
+        checkpoint.pipeline_mode = config.mode
         checkpoint_store.save(checkpoint)
 
     acquired = await _acquire_resume_id(checkpoint.resume_id)

@@ -318,6 +318,25 @@ async def _pipeline(
     provider: str = "",
 ) -> None:
     """Run manager/expert/review/synthesis pipeline and push chunks into queue."""
+
+    # --- 精修模式分发 ---
+    if config.mode == "refinement":
+        from engine.refinement.pipeline import run_refinement_pipeline
+        await run_refinement_pipeline(
+            queue=queue,
+            query=query,
+            history=history,
+            model=model,
+            mgr_model=mgr_model,
+            syn_model=syn_model,
+            config=config,
+            temperature=temperature,
+            system_prompt=system_prompt,
+            image_parts=image_parts,
+            resume_checkpoint=resume_checkpoint,
+            provider=provider,
+        )
+        return
     _child_tasks: set[asyncio.Task] = set()
 
     def _spawn(coro: Awaitable[Any]) -> asyncio.Task:

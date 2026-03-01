@@ -248,6 +248,16 @@ class VirtualModel:
     expert_temperature: Optional[float] = None
     review_temperature: Optional[float] = None
     synthesis_temperature: Optional[float] = None
+    # --- 精修流程专用字段 ---
+    mode: str = "classic"  # "classic" 或 "refinement"
+    compliance_model: Optional[str] = None  # 专家规范审核小模型
+    draft_model: Optional[str] = None  # 初稿生成模型
+    review_model: Optional[str] = None  # 审查阶段模型
+    merge_model: Optional[str] = None  # 综合助手模型
+    json_repair_model: Optional[str] = None  # JSON 修复模型
+    refinement_max_rounds: int = 2  # 精修最大迭代轮数
+    compliance_check_max_retries: int = 1  # 规范审核重试次数
+    enable_json_repair: bool = False  # 是否启用 JSON 修复
 
 
 # 注册所有虚拟模型（这里不包括env的）
@@ -461,6 +471,17 @@ def _load_extra_virtual_models() -> list[VirtualModel]:
                 expert_temperature=item.get("expert_temperature"),
                 review_temperature=item.get("review_temperature"),
                 synthesis_temperature=item.get("synthesis_temperature"),
+                mode=item.get("mode", "classic"),
+                compliance_model=item.get("compliance_model"),
+                draft_model=item.get("draft_model"),
+                review_model=item.get("review_model"),
+                merge_model=item.get("merge_model"),
+                json_repair_model=item.get("json_repair_model"),
+                refinement_max_rounds=item.get("refinement_max_rounds", 2),
+                compliance_check_max_retries=item.get(
+                    "compliance_check_max_retries", 1
+                ),
+                enable_json_repair=item.get("enable_json_repair", False),
             )
             models.append(vm)
             logger.info(
@@ -530,11 +551,12 @@ _ResolveResult = tuple[
     Optional[float],             # expert_temperature
     Optional[float],             # review_temperature
     Optional[float],             # synthesis_temperature
+    str,                         # mode ("classic" / "refinement")
 ]
 
 
 def resolve_model(model_id: str) -> _ResolveResult:
-    """解析虚拟模型名，返回各阶段实际模型、思考预算、最大轮数、provider 和温度覆盖.
+    """解析虚拟模型名，返回各阶段实际模型、思考预算、最大轮数、provider、温度覆盖和 mode.
 
     Args:
         model_id: 虚拟模型名或实际模型名.
@@ -544,7 +566,8 @@ def resolve_model(model_id: str) -> _ResolveResult:
          planning_level, expert_level, synthesis_level,
          max_rounds, provider,
          planning_temperature, expert_temperature,
-         review_temperature, synthesis_temperature) 元组.
+         review_temperature, synthesis_temperature,
+         mode) 元组.
     """
     vm = _VIRTUAL_MODEL_MAP.get(model_id)
     if vm:
@@ -557,12 +580,70 @@ def resolve_model(model_id: str) -> _ResolveResult:
             vm.max_rounds, provider,
             vm.planning_temperature, vm.expert_temperature,
             vm.review_temperature, vm.synthesis_temperature,
+            vm.mode,
         )
 
-    # 未注册的模型名，直接透传，默认 high + .env 的 MAX_ROUNDS + 全局 provider + 无温度覆盖
+    # 未注册的模型名，直接透传，默认 high + .env 的 MAX_ROUNDS + 全局 provider + 无温度覆盖 + classic
     return (
         model_id, model_id, model_id,
         "high", "high", "high",
         MAX_ROUNDS, LLM_PROVIDER,
         None, None, None, None,
+        "classic",
     )
+
+
+@dataclass
+class RefinementModelConfig:
+    """精修流程各阶段模型配置."""
+
+    compliance_model: str  # 规范审核模型
+    draft_model: str       # 初稿生成模型
+    review_model: str      # 审查模型
+    merge_model: str       # 综合助手模型
+    json_repair_model: str  # JSON 修复模型
+    refinement_max_rounds: int = 2
+    compliance_check_max_retries: int = 1
+    enable_json_repair: bool = False
+
+
+def resolve_refinement_config(
+    model_id: str,
+    real_model: str,
+    mgr_model: str,
+    syn_model: str,
+) -> RefinementModelConfig:
+    """解析虚拟模型精修流程配置.
+
+    Args:
+        model_id: 虚拟模型名.
+        real_model: 已解析的 Expert 模型.
+        mgr_model: 已解析的 Manager 模型.
+        syn_model: 已解析的 Synthesis 模型.
+
+    Returns:
+        RefinementModelConfig 实例.
+    """
+    vm = _VIRTUAL_MODEL_MAP.get(model_id)
+    default_small = "gemini-3-flash-preview"
+
+    if vm:
+        return RefinementModelConfig(
+            compliance_model=vm.compliance_model or default_small,
+            draft_model=vm.draft_model or real_model,
+            review_model=vm.review_model or mgr_model,
+            merge_model=vm.merge_model or syn_model,
+            json_repair_model=vm.json_repair_model or default_small,
+            refinement_max_rounds=vm.refinement_max_rounds,
+            compliance_check_max_retries=vm.compliance_check_max_retries,
+            enable_json_repair=vm.enable_json_repair,
+        )
+
+    return RefinementModelConfig(
+        compliance_model=default_small,
+        draft_model=real_model,
+        review_model=mgr_model,
+        merge_model=syn_model,
+        json_repair_model=default_small,
+    )
+

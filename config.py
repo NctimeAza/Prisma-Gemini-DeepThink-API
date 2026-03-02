@@ -260,6 +260,7 @@ class VirtualModel:
     refinement_max_rounds: int = 2  # 精修最大迭代轮数
     pre_draft_review_rounds: int = 1  # pre-draft review rounds (0=disabled)
     enable_json_repair: bool = False  # 是否启用 JSON 修复
+    enable_text_cleaner: bool = True  # 是否启用末端文本清洗专家（默认启用）
 
 
 # 注册所有虚拟模型（这里不包括env的）
@@ -580,6 +581,7 @@ def _load_extra_virtual_models() -> list[VirtualModel]:
                 refinement_max_rounds=item.get("refinement_max_rounds", 2),
                 pre_draft_review_rounds=item.get("pre_draft_review_rounds", 1),
                 enable_json_repair=item.get("enable_json_repair", False),
+                enable_text_cleaner=item.get("enable_text_cleaner", True),
             )
             models.append(vm)
             logger.info(
@@ -704,6 +706,7 @@ class RefinementModelConfig:
     refinement_max_rounds: int = 2
     pre_draft_review_rounds: int = 1  # pre-draft review rounds (0=disabled)
     enable_json_repair: bool = False
+    enable_text_cleaner: bool = True
 
 
 def resolve_refinement_config(
@@ -735,6 +738,7 @@ def resolve_refinement_config(
             refinement_max_rounds=vm.refinement_max_rounds,
             pre_draft_review_rounds=vm.pre_draft_review_rounds,
             enable_json_repair=vm.enable_json_repair,
+            enable_text_cleaner=vm.enable_text_cleaner,
         )
 
     return RefinementModelConfig(

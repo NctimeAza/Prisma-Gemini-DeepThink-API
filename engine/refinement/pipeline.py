@@ -12,19 +12,23 @@ from config import LLM_NETWORK_RETRIES, get_thinking_budget
 from clients.llm_client import generate_content
 from engine import manager
 from engine.orchestrator import _apply_review_actions
-from engine.refinement import applier, draft, improver, merger, planner, reviewer
+from engine.refinement import applier, cleaner, draft, improver, merger, planner, reviewer
 from models import (
     DeepThinkCheckpoint,
     DeepThinkConfig,
     DiffOperation,
     ExpertConfig,
     ExpertResult,
+    MergeDecision,
     RefinementExpertConfig,
     ReviewResult,
 )
 from prompts import (
     MSG_PIPELINE_START,
     MSG_REFINEMENT_APPLIED,
+    MSG_REFINEMENT_CLEAN_DONE,
+    MSG_REFINEMENT_CLEAN_ERROR,
+    MSG_REFINEMENT_CLEAN_START,
     MSG_REFINEMENT_DRAFT_DONE,
     MSG_REFINEMENT_DRAFT_START,
     MSG_REFINEMENT_EXPERT_DONE,
@@ -331,6 +335,7 @@ async def run_refinement_pipeline(
         "improvers",
         "merge",
         "apply",
+        "cleanup",
         "output",
     ]
 
@@ -731,6 +736,66 @@ async def run_refinement_pipeline(
                 break
 
             await _emit(MSG_REFINEMENT_NEXT_ROUND.format(round=refinement_round + 1))
+
+        if config.enable_text_cleaner and not _should_skip("cleanup"):
+            _set_refinement_phase("cleanup")
+            await _emit(MSG_REFINEMENT_CLEAN_START)
+
+            try:
+                draft_lines = reviewer.split_draft_to_lines(draft_text)
+                draft_lines_json = json.dumps(
+                    draft_lines,
+                    ensure_ascii=False,
+                )
+                clean_analysis, clean_ops = await cleaner.run_text_cleaner(
+                    model=merge_model,
+                    query=query,
+                    draft_lines_json=draft_lines_json,
+                    budget=synthesis_budget,
+                    max_line=len(draft_lines),
+                    user_system_prompt=system_prompt,
+                    provider=provider,
+                    json_via_prompt=config.json_via_prompt,
+                )
+
+                if clean_analysis:
+                    await _emit(
+                        f"[TextCleaner] analysis:\n"
+                        f"```content\n{clean_analysis[:5000]}\n```"
+                    )
+
+                removed = sum(1 for op in clean_ops if op.action == "remove")
+                modified = sum(1 for op in clean_ops if op.action == "modify")
+
+                if clean_ops:
+                    for idx, op in enumerate(clean_ops):
+                        op.op_id = idx
+                        op.expert_role = op.expert_role or "TextCleaner"
+
+                    decisions = [
+                        MergeDecision(op_id=op.op_id, decision="accept")
+                        for op in clean_ops
+                    ]
+
+                    draft_text = applier.apply_refinements(
+                        draft_text,
+                        clean_ops,
+                        decisions,
+                    )
+
+                    if resume_checkpoint:
+                        resume_checkpoint.draft_content = draft_text
+                        resume_checkpoint.updated_at = _now_ts()
+
+                await _emit(
+                    MSG_REFINEMENT_CLEAN_DONE.format(
+                        removed=removed, modified=modified
+                    )
+                )
+
+            except Exception as exc:
+                logger.warning("[RefinementPipeline] text cleaner failed: %s", exc)
+                await _emit(MSG_REFINEMENT_CLEAN_ERROR)
 
         _set_refinement_phase("output")
         await _emit(MSG_REFINEMENT_OUTPUT)

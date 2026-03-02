@@ -106,6 +106,7 @@ def _resolve_request(
             "refinement_max_rounds": ref_cfg.refinement_max_rounds,
             "pre_draft_review_rounds": ref_cfg.pre_draft_review_rounds,
             "enable_json_repair": ref_cfg.enable_json_repair,
+            "enable_text_cleaner": ref_cfg.enable_text_cleaner,
             "draft_model": ref_cfg.draft_model,
             "review_model": ref_cfg.review_model,
             "merge_model": ref_cfg.merge_model,

@@ -26,6 +26,7 @@ RefinementPhase = Literal[
     "improvers",  # 改进专家并行执行
     "merge",  # 综合助手合并
     "apply",  # 应用精修到初稿
+    "cleanup",  # 末端文本清洗（去相邻重复）
     "output",  # 输出最终结果
 ]
 AppState = Literal[
@@ -120,6 +121,7 @@ class DeepThinkConfig(BaseModel):
     refinement_max_rounds: int = 2  # 精修迭代轮数
     pre_draft_review_rounds: int = 1  # 初稿前额外审核轮数（0 表示禁用）
     enable_json_repair: bool = False  # 是否启用 JSON 格式修复小模型
+    enable_text_cleaner: bool = True  # 是否启用末端文本清洗专家（默认启用）
     draft_model: Optional[str] = None  # 初稿生成模型
     review_model: Optional[str] = None  # 审查阶段模型
     merge_model: Optional[str] = None  # 综合助手模型

@@ -777,6 +777,34 @@ REFINEMENT_MERGE_PROMPT: str = _load_prompt(
     "REFINEMENT_MERGE_PROMPT", _DEFAULT_REFINEMENT_MERGE_PROMPT
 )
 
+# --- 文本清洗专家（末端去相邻重复） ---
+
+_DEFAULT_REFINEMENT_CLEANER_PROMPT = (
+    "你是文本清洗专家。你将收到用户原始需求、用户的重要指示（若有），以及一份按行切分的正文（JSON 数组）。\n\n"
+    "你的任务：检查正文中是否存在由于精修 diff 流程瑕疵导致的“相邻重复/近重复句子或段落”。\n"
+    "仅处理相邻重复（可忽略空行，即把空行视为不打断相邻关系）。不要做全局去重。\n\n"
+    "输出要求（非常重要）：\n"
+    "1. 只输出 JSON，不要输出 markdown、代码块或其他解释文字。\n"
+    "2. 输出格式：\n"
+    "{\n"
+    "  \"analysis\": \"你的简短分析（可为空）\",\n"
+    "  \"operations\": [\n"
+    "    {\"action\": \"remove\", \"line\": 12, \"reason\": \"删除相邻重复\"},\n"
+    "    {\"action\": \"modify\", \"line\": 20, \"content\": \"修改后的整行文本\", \"reason\": \"删减重复部分\"}\n"
+    "  ]\n"
+    "}\n\n"
+    "规则：\n"
+    "- operations 只允许 action=remove 或 modify；禁止 add。\n"
+    "- line 使用 1-based 行号，基于输入正文行号。\n"
+    "- modify 必须提供 content，且 content 必须是一整行文本（不要包含换行）。\n"
+    "- 不要重排内容，不要引入新信息，不要改变风格；仅做最小必要修改来去掉相邻重复。\n"
+    "- 如果不确定是否重复，宁可不改（operations 为空）。\n"
+)
+
+REFINEMENT_CLEANER_PROMPT: str = _load_prompt(
+    "REFINEMENT_CLEANER_PROMPT", _DEFAULT_REFINEMENT_CLEANER_PROMPT
+)
+
 # --- 精修流程状态消息 ---
 
 MSG_REFINEMENT_PLANNING: str = _load_prompt(
@@ -906,6 +934,30 @@ MSG_REFINEMENT_APPLIED: str = _load_prompt(
     _select_runtime_text(
         "精修操作已应用到初稿。",
         "Refinement operations applied to draft.",
+    ),
+)
+
+MSG_REFINEMENT_CLEAN_START: str = _load_prompt(
+    "MSG_REFINEMENT_CLEAN_START",
+    _select_runtime_text(
+        "正在进行末端文本清洗（相邻重复检查）。",
+        "Running final text cleanup (adjacent-duplicate check).",
+    ),
+)
+
+MSG_REFINEMENT_CLEAN_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_CLEAN_DONE",
+    _select_runtime_text(
+        "文本清洗完成：删除 {removed} 行 / 修改 {modified} 行。",
+        "Text cleanup done: {removed} removed / {modified} modified.",
+    ),
+)
+
+MSG_REFINEMENT_CLEAN_ERROR: str = _load_prompt(
+    "MSG_REFINEMENT_CLEAN_ERROR",
+    _select_runtime_text(
+        "文本清洗失败，已跳过。",
+        "Text cleanup failed; skipped.",
     ),
 )
 

@@ -443,7 +443,10 @@ MSG_EXPERT_TASK_PREFIX: str = _load_prompt(
 # ============================================================
 
 def get_expert_system_instruction(
-    role: str, description: str, context: str,
+    role: str,
+    description: str,
+    context: str,
+    all_expert_roles: list[str] | None = None,
     user_system_prompt: str = "",
 ) -> str:
     """生成 Expert 的 system instruction.
@@ -462,9 +465,15 @@ def get_expert_system_instruction(
     parts = []
     if user_system_prompt:
         parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
+    roles = [r for r in (all_expert_roles or []) if r]
+    if not roles:
+        roles = [role]
     parts.append(
         EXPERT_INSTRUCTION_TEMPLATE.format(
-            role=role, description=description, context=context,
+            role=role,
+            description=description,
+            context=context,
+            all_experts="、".join(dict.fromkeys(roles)),
         )
     )
     return "\n\n".join(parts)

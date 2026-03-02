@@ -64,6 +64,7 @@ def _resolve_request_config(
         model_max_rounds, provider,
         planning_temp, expert_temp, review_temp, synthesis_temp,
         mode,
+        json_via_prompt,
     ) = resolve_model(model_id)
 
     refinement_kwargs: dict[str, Any] = {}
@@ -93,6 +94,7 @@ def _resolve_request_config(
         expert_temperature=expert_temp,
         review_temperature=review_temp,
         synthesis_temperature=synthesis_temp,
+        json_via_prompt=json_via_prompt,
         **refinement_kwargs,
     )
     return real_model, mgr_model, syn_model, config, provider

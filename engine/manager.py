@@ -203,6 +203,7 @@ async def analyze(
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
+    json_via_prompt: bool = False,
 ) -> AnalysisResult:
     """Manager 规划阶段：分析用户问题，分解为 Expert 任务.
 
@@ -232,6 +233,7 @@ async def analyze(
             temperature=temperature,
             image_parts=image_parts,
             provider=provider,
+            json_via_prompt=json_via_prompt,
         )
         logger.debug(
             "[Manager] analyze raw response:\n%s",
@@ -277,6 +279,7 @@ async def review(
     remaining_rounds: int = 0,
     previous_reviews: list[ReviewResult] | None = None,
     provider: str = "",
+    json_via_prompt: bool = False,
 ) -> ReviewResult:
     """Manager 审查阶段：评估 Expert 输出质量.
 
@@ -366,6 +369,7 @@ async def review(
             temperature=temperature,
             image_parts=image_parts,
             provider=provider,
+            json_via_prompt=json_via_prompt,
         )
 
         logger.debug(

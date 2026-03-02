@@ -384,6 +384,7 @@ async def run_refinement_pipeline(
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
                 provider=provider,
+                json_via_prompt=config.json_via_prompt,
             )
 
             if not expert_configs:
@@ -452,6 +453,7 @@ async def run_refinement_pipeline(
                     remaining_rounds=max(pre_draft_review_rounds - pre_draft_round, 0),
                     previous_reviews=pre_draft_reviews,
                     provider=provider,
+                    json_via_prompt=config.json_via_prompt,
                 )
                 pre_review.round = pre_draft_round
                 _upsert_review(pre_draft_reviews, pre_review)

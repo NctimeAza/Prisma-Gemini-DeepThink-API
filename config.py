@@ -248,6 +248,9 @@ class VirtualModel:
     expert_temperature: Optional[float] = None
     review_temperature: Optional[float] = None
     synthesis_temperature: Optional[float] = None
+    # 开启后，会在结构化 JSON 请求里额外通过 prompt 强制约束输出格式
+    # 用于兼容不稳定或不支持 response_format 的 OpenAI 兼容渠道
+    json_via_prompt: bool = False
     # --- 精修流程专用字段 ---
     mode: str = "classic"  # "classic" 或 "refinement"
     draft_model: Optional[str] = None  # 初稿生成模型
@@ -568,6 +571,7 @@ def _load_extra_virtual_models() -> list[VirtualModel]:
                 expert_temperature=item.get("expert_temperature"),
                 review_temperature=item.get("review_temperature"),
                 synthesis_temperature=item.get("synthesis_temperature"),
+                json_via_prompt=item.get("json_via_prompt", False),
                 mode=item.get("mode", "classic"),
                 draft_model=item.get("draft_model"),
                 review_model=item.get("review_model"),
@@ -646,11 +650,12 @@ _ResolveResult = tuple[
     Optional[float],             # review_temperature
     Optional[float],             # synthesis_temperature
     str,                         # mode ("classic" / "refinement")
+    bool,                        # json_via_prompt
 ]
 
 
 def resolve_model(model_id: str) -> _ResolveResult:
-    """解析虚拟模型名，返回各阶段实际模型、思考预算、最大轮数、provider、温度覆盖和 mode.
+    """解析虚拟模型名，返回各阶段实际模型、思考预算、最大轮数、provider、温度覆盖、mode 和 JSON 提示增强开关.
 
     Args:
         model_id: 虚拟模型名或实际模型名.
@@ -661,7 +666,7 @@ def resolve_model(model_id: str) -> _ResolveResult:
          max_rounds, provider,
          planning_temperature, expert_temperature,
          review_temperature, synthesis_temperature,
-         mode) 元组.
+         mode, json_via_prompt) 元组.
     """
     vm = _VIRTUAL_MODEL_MAP.get(model_id)
     if vm:
@@ -675,6 +680,7 @@ def resolve_model(model_id: str) -> _ResolveResult:
             vm.planning_temperature, vm.expert_temperature,
             vm.review_temperature, vm.synthesis_temperature,
             vm.mode,
+            vm.json_via_prompt,
         )
 
     # 未注册的模型名，直接透传，默认 high + .env 的 MAX_ROUNDS + 全局 provider + 无温度覆盖 + classic
@@ -684,6 +690,7 @@ def resolve_model(model_id: str) -> _ResolveResult:
         MAX_ROUNDS, LLM_PROVIDER,
         None, None, None, None,
         "classic",
+        False,
     )
 
 

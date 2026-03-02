@@ -322,6 +322,40 @@ def _lower_schema_types(value: Any) -> Any:
     return value
 
 
+def _build_json_prompt_guard(schema: dict[str, Any]) -> str:
+    schema_text = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "JSON output contract:\n"
+        "1) Output exactly one JSON object and nothing else.\n"
+        "2) Do not use markdown/code fences/explanations.\n"
+        "3) The JSON must conform to this schema exactly:\n"
+        f"{schema_text}"
+    )
+
+
+def _inject_json_prompt_guard(
+    messages: list[dict[str, Any]],
+    schema: dict[str, Any],
+) -> list[dict[str, Any]]:
+    guard = _build_json_prompt_guard(schema)
+    out: list[dict[str, Any]] = [dict(msg) for msg in messages]
+
+    for msg in out:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = f"{content}\n\n{guard}"
+        elif isinstance(content, list):
+            msg["content"] = [*content, {"type": "text", "text": guard}]
+        else:
+            msg["content"] = guard
+        return out
+
+    out.insert(0, {"role": "system", "content": guard})
+    return out
+
+
 def _extract_response_text(response: Any) -> tuple[str, str]:
     choices = _get_attr(response, "choices", []) or []
     if not choices:
@@ -358,6 +392,7 @@ async def generate_json(
     image_parts: list[dict] | None = None,
     *,
     provider: str = "",
+    json_via_prompt: bool = False,
 ) -> dict[str, Any]:
     """Generate structured JSON with strict-first fallback policy."""
     await _random_delay()
@@ -375,6 +410,13 @@ async def generate_json(
         system_instruction=system_instruction,
     )
     normalized_schema = _lower_schema_types(response_schema)
+    if json_via_prompt:
+        logger.info(
+            "[OpenAI] json_via_prompt enabled for model=%s (provider=%s)",
+            model,
+            provider or LLM_PROVIDER,
+        )
+        messages = _inject_json_prompt_guard(messages, normalized_schema)
 
     strict_kwargs = _chat_create_kwargs(
         model=model,
@@ -400,12 +442,13 @@ async def generate_json(
     )
 
     fallback_messages = list(messages)
+    fallback_hint = "Return only one valid JSON object. Do not use markdown code fences."
+    if json_via_prompt:
+        fallback_hint = _build_json_prompt_guard(normalized_schema)
     fallback_messages.append(
         {
             "role": "user",
-            "content": (
-                "Return only one valid JSON object. Do not use markdown code fences."
-            ),
+            "content": fallback_hint,
         }
     )
     text_fallback_kwargs = _chat_create_kwargs(

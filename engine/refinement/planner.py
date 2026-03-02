@@ -52,6 +52,7 @@ async def plan(
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
+    json_via_prompt: bool = False,
 ) -> list[RefinementExpertConfig]:
     """精修规划阶段: 分析需求并分配专家.
 
@@ -83,6 +84,7 @@ async def plan(
             temperature=temperature,
             image_parts=image_parts,
             provider=provider,
+            json_via_prompt=json_via_prompt,
         )
         logger.debug(
             "[RefinementPlanner] raw response:\n%s",

@@ -114,6 +114,8 @@ class DeepThinkConfig(BaseModel):
     expert_temperature: Optional[float] = None
     review_temperature: Optional[float] = None
     synthesis_temperature: Optional[float] = None
+    # 开启后，对结构化 JSON 请求额外追加 prompt 级 JSON 约束（默认关闭）
+    json_via_prompt: bool = False
     # --- 精修流程专用配置 ---
     refinement_max_rounds: int = 2  # 精修迭代轮数
     pre_draft_review_rounds: int = 1  # 初稿前额外审核轮数（0 表示禁用）

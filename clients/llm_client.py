@@ -33,6 +33,7 @@ async def generate_json(
     image_parts: list[dict] | None = None,
     *,
     provider: str = "",
+    json_via_prompt: bool = False,
 ) -> dict[str, Any]:
     """调用 LLM 生成结构化 JSON 响应（自动分发到对应 provider）.
 
@@ -58,6 +59,7 @@ async def generate_json(
             temperature=temperature,
             image_parts=image_parts,
             provider=p,
+            json_via_prompt=json_via_prompt,
         )
     return await _openai.generate_json(
         model, contents, system_instruction,
@@ -65,6 +67,7 @@ async def generate_json(
         temperature=temperature,
         image_parts=image_parts,
         provider=p,
+        json_via_prompt=json_via_prompt,
     )
 
 

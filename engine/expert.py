@@ -22,6 +22,7 @@ async def run_expert(
     expert: ExpertResult,
     context: str,
     budget: int,
+    all_expert_roles: list[str] | None = None,
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
@@ -46,7 +47,10 @@ async def run_expert(
     logger.info("[Expert] Starting: %s (Round %d)", expert.role, expert.round)
 
     system_instruction = get_expert_system_instruction(
-        expert.role, expert.description, context,
+        expert.role,
+        expert.description,
+        context,
+        all_expert_roles=all_expert_roles,
         user_system_prompt=user_system_prompt,
     )
 

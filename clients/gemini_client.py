@@ -104,6 +104,7 @@ async def generate_json(
     image_parts: list[dict] | None = None,
     *,
     provider: str = "",
+    json_via_prompt: bool = False,
 ) -> dict[str, Any]:
     """调用 Gemini 生成结构化 JSON 响应.
 

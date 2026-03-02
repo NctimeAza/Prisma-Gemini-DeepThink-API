@@ -392,6 +392,12 @@ async def _pipeline(
                 exp,
                 context,
                 budget,
+                all_expert_roles=list(
+                    dict.fromkeys(
+                        e.role for e in all_experts
+                        if e.round == exp.round and e.role
+                    )
+                ),
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
                 provider=provider,
@@ -471,6 +477,7 @@ async def _pipeline(
                     user_system_prompt=system_prompt,
                     image_parts=image_parts,
                     provider=provider,
+                    json_via_prompt=config.json_via_prompt,
                 )
             )
             analysis = await manager_task
@@ -540,6 +547,7 @@ async def _pipeline(
                             remaining_rounds=remaining_rounds,
                             previous_reviews=all_reviews,
                             provider=provider,
+                            json_via_prompt=config.json_via_prompt,
                         )
                     )
                     review_result = await review_task

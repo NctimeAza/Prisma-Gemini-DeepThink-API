@@ -28,6 +28,7 @@ from config import (
     LLM_PROVIDER,
     MAX_CONTEXT_MESSAGES,
     SSE_HEARTBEAT_INTERVAL,
+    StageProviders,
     resolve_model,
     resolve_refinement_config,
 )
@@ -57,7 +58,7 @@ def _resume_hint(resume_id: str) -> str:
 
 def _resolve_request_config(
     model_id: str,
-) -> tuple[str, str, str, DeepThinkConfig, str]:
+) -> tuple[str, str, str, DeepThinkConfig, str, StageProviders]:
     (
         real_model, mgr_model, syn_model,
         p_level, e_level, s_level,
@@ -65,6 +66,7 @@ def _resolve_request_config(
         planning_temp, expert_temp, review_temp, synthesis_temp,
         mode,
         json_via_prompt,
+        stage_providers,
     ) = resolve_model(model_id)
 
     refinement_kwargs: dict[str, Any] = {}
@@ -98,7 +100,7 @@ def _resolve_request_config(
         json_via_prompt=json_via_prompt,
         **refinement_kwargs,
     )
-    return real_model, mgr_model, syn_model, config, provider
+    return real_model, mgr_model, syn_model, config, provider, stage_providers
 
 
 # ---------------------------------------------------------------------------
@@ -316,9 +318,14 @@ async def _gemini_sse_stream(
         yield f"data: {json.dumps({'error': 'empty query'})}\n\n"
         return
 
-    real_model, mgr_model, syn_model, config, provider = _resolve_request_config(
-        model_id
-    )
+    (
+        real_model,
+        mgr_model,
+        syn_model,
+        config,
+        provider,
+        stage_providers,
+    ) = _resolve_request_config(model_id)
 
     checkpoint_store = CheckpointStore()
     resume_id = f"res_{uuid.uuid4().hex[:16]}"
@@ -369,7 +376,7 @@ async def _gemini_sse_stream(
             resume_checkpoint=checkpoint,
             event_callback=_persist_event,
             resume_mode=False,
-            provider=provider,
+            stage_providers=stage_providers,
         ):
             if grounding:
                 all_grounding.extend(grounding)
@@ -452,9 +459,14 @@ async def generate_content(model_name: str, raw_request: Request):
             content={"error": {"message": "empty query", "code": 400}},
         )
 
-    real_model, mgr_model, syn_model, config, provider = _resolve_request_config(
-        model_id
-    )
+    (
+        real_model,
+        mgr_model,
+        syn_model,
+        config,
+        provider,
+        stage_providers,
+    ) = _resolve_request_config(model_id)
 
     checkpoint_store = CheckpointStore()
     resume_id = f"res_{uuid.uuid4().hex[:16]}"
@@ -500,7 +512,7 @@ async def generate_content(model_name: str, raw_request: Request):
         resume_checkpoint=checkpoint,
         event_callback=_persist_event,
         resume_mode=False,
-        provider=provider,
+        stage_providers=stage_providers,
     ):
         full_text += text_chunk
         full_reasoning += thought_chunk

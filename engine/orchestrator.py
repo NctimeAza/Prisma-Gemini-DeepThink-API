@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, AsyncGenerator, Optional
 
-from config import SSE_HEARTBEAT_INTERVAL, get_thinking_budget
+from config import LLM_PROVIDER, SSE_HEARTBEAT_INTERVAL, StageProviders, get_thinking_budget
 from engine import expert, manager, synthesis
 from models import (
     AnalysisResult,
@@ -316,9 +316,17 @@ async def _pipeline(
     resume_checkpoint: DeepThinkCheckpoint | None = None,
     event_callback: EventCallback | None = None,
     resume_mode: bool = False,
+    stage_providers: StageProviders | None = None,
     provider: str = "",
 ) -> None:
     """Run manager/expert/review/synthesis pipeline and push chunks into queue."""
+
+    stage_providers = stage_providers or StageProviders.from_single(
+        provider or LLM_PROVIDER
+    )
+    manager_provider = stage_providers.manager
+    expert_provider = stage_providers.expert
+    synthesis_provider = stage_providers.synthesis
 
     # --- 精修模式分发 ---
     if config.mode == "refinement":
@@ -335,7 +343,8 @@ async def _pipeline(
             system_prompt=system_prompt,
             image_parts=image_parts,
             resume_checkpoint=resume_checkpoint,
-            provider=provider,
+            stage_providers=stage_providers,
+            provider=manager_provider,
         )
         return
     _child_tasks: set[asyncio.Task] = set()
@@ -400,7 +409,7 @@ async def _pipeline(
                 ),
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=provider,
+                provider=expert_provider,
             )
 
             if result.status == "completed":
@@ -476,7 +485,7 @@ async def _pipeline(
                     ),
                     user_system_prompt=system_prompt,
                     image_parts=image_parts,
-                    provider=provider,
+                    provider=manager_provider,
                     json_via_prompt=config.json_via_prompt,
                 )
             )
@@ -546,7 +555,7 @@ async def _pipeline(
                             image_parts=image_parts,
                             remaining_rounds=remaining_rounds,
                             previous_reviews=all_reviews,
-                            provider=provider,
+                            provider=manager_provider,
                             json_via_prompt=config.json_via_prompt,
                         )
                     )
@@ -653,7 +662,7 @@ async def _pipeline(
                 ),
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=provider,
+                provider=synthesis_provider,
             ):
                 await queue.put((text_chunk, thought_chunk, "synthesis", grounding_chunks))
         except Exception as exc:
@@ -697,11 +706,16 @@ async def run_deep_think(
     resume_checkpoint: DeepThinkCheckpoint | None = None,
     event_callback: EventCallback | None = None,
     resume_mode: bool = False,
+    stage_providers: StageProviders | None = None,
     provider: str = "",
 ) -> AsyncGenerator[tuple[str, str, str, list[dict]], None]:
     """Run the complete DeepThink pipeline and stream text/thought chunks."""
     if not config:
         config = DEFAULT_CONFIG
+
+    stage_providers = stage_providers or StageProviders.from_single(
+        provider or LLM_PROVIDER
+    )
 
     mgr_model = manager_model or model
     syn_model = synthesis_model or model
@@ -734,6 +748,7 @@ async def run_deep_think(
             resume_checkpoint,
             event_callback,
             resume_mode,
+            stage_providers,
             provider,
         )
     )

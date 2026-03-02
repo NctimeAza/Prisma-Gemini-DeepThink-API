@@ -8,7 +8,7 @@ import logging
 import time
 from typing import Optional
 
-from config import LLM_NETWORK_RETRIES, get_thinking_budget
+from config import LLM_NETWORK_RETRIES, LLM_PROVIDER, StageProviders, get_thinking_budget
 from clients.llm_client import generate_content
 from engine import manager
 from engine.orchestrator import _apply_review_actions
@@ -236,9 +236,17 @@ async def run_refinement_pipeline(
     system_prompt: str = "",
     image_parts: list[dict] | None = None,
     resume_checkpoint: DeepThinkCheckpoint | None = None,
+    stage_providers: StageProviders | None = None,
     provider: str = "",
 ) -> None:
     """Main entry point for refinement pipeline."""
+
+    stage_providers = stage_providers or StageProviders.from_single(
+        provider or LLM_PROVIDER
+    )
+    manager_provider = stage_providers.manager
+    expert_provider = stage_providers.expert
+    synthesis_provider = stage_providers.synthesis
 
     async def _emit(text: str) -> None:
         await queue.put(("", f"{text}\n", "refinement", []))
@@ -271,7 +279,7 @@ async def run_refinement_pipeline(
                 budget=expert_budget,
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=provider,
+                provider=expert_provider,
                 forced_temperature=config.expert_temperature,
             )
             await _emit(MSG_REFINEMENT_EXPERT_DONE.format(expert_name=output["role"]))
@@ -362,7 +370,7 @@ async def run_refinement_pipeline(
             ),
             user_system_prompt=system_prompt,
             image_parts=image_parts,
-            provider=provider,
+            provider=manager_provider,
             enable_json_repair=enable_json_repair,
             json_repair_model=json_repair_model,
         )
@@ -388,7 +396,7 @@ async def run_refinement_pipeline(
                 ),
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=provider,
+                provider=manager_provider,
                 json_via_prompt=config.json_via_prompt,
             )
 
@@ -457,7 +465,7 @@ async def run_refinement_pipeline(
                     image_parts=image_parts,
                     remaining_rounds=max(pre_draft_review_rounds - pre_draft_round, 0),
                     previous_reviews=pre_draft_reviews,
-                    provider=provider,
+                    provider=manager_provider,
                     json_via_prompt=config.json_via_prompt,
                 )
                 pre_review.round = pre_draft_round
@@ -553,7 +561,7 @@ async def run_refinement_pipeline(
                 ),
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=provider,
+                provider=expert_provider,
             )
 
             await _emit(MSG_REFINEMENT_DRAFT_DONE)
@@ -628,7 +636,7 @@ async def run_refinement_pipeline(
                         guidance=review_analysis.expert_guidance.get(cfg.role, ""),
                         user_system_prompt=system_prompt,
                         image_parts=image_parts,
-                        provider=provider,
+                        provider=expert_provider,
                         enable_json_repair=enable_json_repair,
                         json_repair_model=json_repair_model,
                     )
@@ -687,7 +695,7 @@ async def run_refinement_pipeline(
                         if config.synthesis_temperature is not None
                         else 0.5
                     ),
-                    provider=provider,
+                    provider=synthesis_provider,
                     enable_json_repair=enable_json_repair,
                     json_repair_model=json_repair_model,
                 )
@@ -754,7 +762,7 @@ async def run_refinement_pipeline(
                     budget=synthesis_budget,
                     max_line=len(draft_lines),
                     user_system_prompt=system_prompt,
-                    provider=provider,
+                    provider=synthesis_provider,
                     json_via_prompt=config.json_via_prompt,
                 )
 

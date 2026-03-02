@@ -19,6 +19,7 @@ from config import (
     ENABLE_RECURSIVE_LOOP,
     MAX_CONTEXT_MESSAGES,
     SSE_HEARTBEAT_INTERVAL,
+    StageProviders,
     resolve_model,
 )
 from engine.checkpoint_store import CheckpointStore, CheckpointStoreError
@@ -82,7 +83,7 @@ def _extract_system_prompt(request: ChatCompletionRequest) -> str:
 
 def _resolve_request(
     request: ChatCompletionRequest,
-) -> tuple[str, str, str, DeepThinkConfig, str]:
+) -> tuple[str, str, str, DeepThinkConfig, str, "StageProviders"]:
     (
         real_model, mgr_model, syn_model,
         p_level, e_level, s_level,
@@ -90,10 +91,18 @@ def _resolve_request(
         planning_temp, expert_temp, review_temp, synthesis_temp,
         mode,
         json_via_prompt,
+        stage_providers,
     ) = resolve_model(request.model)
 
     if request.prisma_config:
-        return real_model, mgr_model, syn_model, request.prisma_config, provider
+        return (
+            real_model,
+            mgr_model,
+            syn_model,
+            request.prisma_config,
+            provider,
+            stage_providers,
+        )
 
     # 精修流程额外配置
     refinement_kwargs: dict = {}
@@ -128,7 +137,7 @@ def _resolve_request(
         json_via_prompt=json_via_prompt,
         **refinement_kwargs,
     )
-    return real_model, mgr_model, syn_model, config, provider
+    return real_model, mgr_model, syn_model, config, provider, stage_providers
 
 
 def _parse_continue_command(
@@ -257,7 +266,7 @@ async def _generate_sse_stream(
     checkpoint_store: CheckpointStore,
     resume_mode: bool,
     replay_only: bool,
-    provider: str = "",
+    stage_providers: StageProviders,
 ) -> AsyncGenerator[str, None]:
     """Stream OpenAI-compatible SSE chunks with optional checkpoint replay."""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -326,7 +335,7 @@ async def _generate_sse_stream(
                     resume_checkpoint=checkpoint,
                     event_callback=_persist_event,
                     resume_mode=resume_mode,
-                    provider=provider,
+                    stage_providers=stage_providers,
                 ):
                     await sse_queue.put(("data", text_chunk, thought_chunk, grounding))
             except Exception as exc:
@@ -441,7 +450,7 @@ async def chat_completions(raw_request: Request):
     history = _build_history(request)
     system_prompt = _extract_system_prompt(request)
     image_parts = _extract_image_parts(request)
-    real_model, mgr_model, syn_model, config, provider = _resolve_request(request)
+    real_model, mgr_model, syn_model, config, provider, stage_providers = _resolve_request(request)
 
     checkpoint_store = CheckpointStore()
     now = int(time.time())
@@ -540,7 +549,7 @@ async def chat_completions(raw_request: Request):
                 checkpoint_store=checkpoint_store,
                 resume_mode=continue_mode,
                 replay_only=replay_only,
-                provider=provider,
+                stage_providers=stage_providers,
             ),
             media_type="text/event-stream",
             headers={
@@ -579,7 +588,7 @@ async def chat_completions(raw_request: Request):
                 resume_checkpoint=checkpoint,
                 event_callback=_persist_event,
                 resume_mode=continue_mode,
-                provider=provider,
+                stage_providers=stage_providers,
             )
             disconnect_task = asyncio.create_task(
                 _wait_for_client_disconnect(raw_request)

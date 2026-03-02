@@ -224,6 +224,20 @@ def get_thinking_budget(level: str, model: str) -> int:
 
 
 @dataclass
+class StageProviders:
+    """各阶段使用的 Provider."""
+
+    manager: str
+    expert: str
+    synthesis: str
+
+    @classmethod
+    def from_single(cls, provider: str) -> "StageProviders":
+        """使用同一个 provider 填充三个阶段."""
+        return cls(manager=provider, expert=provider, synthesis=provider)
+
+
+@dataclass
 class VirtualModel:
     """虚拟模型定义：对外暴露的模型名 -> 实际模型 + 思考预算.
 
@@ -243,6 +257,9 @@ class VirtualModel:
     manager_model: Optional[str] = None    # Manager 专用模型（None则复用 real_model）
     synthesis_model: Optional[str] = None  # Synthesis 专用模型（None则复用 real_model）
     provider: str = ""  # LLM provider 标识符（空字符串则使用全局 LLM_PROVIDER）
+    manager_provider: Optional[str] = None  # 规划/Review阶段 provider
+    expert_provider: Optional[str] = None   # Expert/执行阶段 provider
+    synthesis_provider: Optional[str] = None  # 综合/合并阶段 provider
     # 各阶段温度覆盖（None = 不覆盖，使用请求温度或 Manager 分配温度）
     planning_temperature: Optional[float] = None
     expert_temperature: Optional[float] = None
@@ -568,6 +585,9 @@ def _load_extra_virtual_models() -> list[VirtualModel]:
                 manager_model=item.get("manager_model"),
                 synthesis_model=item.get("synthesis_model"),
                 provider=item.get("provider", ""),
+                manager_provider=item.get("manager_provider"),
+                expert_provider=item.get("expert_provider"),
+                synthesis_provider=item.get("synthesis_provider"),
                 planning_temperature=item.get("planning_temperature"),
                 expert_temperature=item.get("expert_temperature"),
                 review_temperature=item.get("review_temperature"),
@@ -646,18 +666,19 @@ _VIRTUAL_MODEL_MAP: dict[str, VirtualModel] = {
 _ResolveResult = tuple[
     str, str, str,               # real_model, manager_model, synthesis_model
     str, str, str,               # planning_level, expert_level, synthesis_level
-    int, str,                    # max_rounds, provider
+    int, str,                    # max_rounds, legacy single provider
     Optional[float],             # planning_temperature
     Optional[float],             # expert_temperature
     Optional[float],             # review_temperature
     Optional[float],             # synthesis_temperature
     str,                         # mode ("classic" / "refinement")
     bool,                        # json_via_prompt
+    StageProviders,              # stage_providers (manager/expert/synthesis)
 ]
 
 
 def resolve_model(model_id: str) -> _ResolveResult:
-    """解析虚拟模型名，返回各阶段实际模型、思考预算、最大轮数、provider、温度覆盖、mode 和 JSON 提示增强开关.
+    """解析虚拟模型名，返回各阶段实际模型、思考预算、最大轮数、provider、温度覆盖、mode、JSON 提示增强开关和阶段 provider.
 
     Args:
         model_id: 虚拟模型名或实际模型名.
@@ -675,6 +696,11 @@ def resolve_model(model_id: str) -> _ResolveResult:
         mgr_model = vm.manager_model or vm.real_model
         syn_model = vm.synthesis_model or vm.real_model
         provider = vm.provider or LLM_PROVIDER
+        stage_providers = StageProviders(
+            manager=vm.manager_provider or provider,
+            expert=vm.expert_provider or provider,
+            synthesis=vm.synthesis_provider or provider,
+        )
         return (
             vm.real_model, mgr_model, syn_model,
             vm.planning_level, vm.expert_level, vm.synthesis_level,
@@ -683,9 +709,11 @@ def resolve_model(model_id: str) -> _ResolveResult:
             vm.review_temperature, vm.synthesis_temperature,
             vm.mode,
             vm.json_via_prompt,
+            stage_providers,
         )
 
     # 未注册的模型名，直接透传，默认 high + .env 的 MAX_ROUNDS + 全局 provider + 无温度覆盖 + classic
+    stage_providers = StageProviders.from_single(LLM_PROVIDER)
     return (
         model_id, model_id, model_id,
         "high", "high", "high",
@@ -693,6 +721,7 @@ def resolve_model(model_id: str) -> _ResolveResult:
         None, None, None, None,
         "classic",
         False,
+        stage_providers,
     )
 
 

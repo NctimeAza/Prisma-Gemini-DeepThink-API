@@ -58,7 +58,7 @@ py main.py
 
 ### 虚拟模型
 
-内置`gemini-3.1-pro-deepthink-{minimal,low,medium,high,extra}`五档预设。通过`VIRTUAL_MODELS_FILE`指向JSON文件可新增或覆盖默认模型。每个虚拟模型可独立指定：实际模型、Manager/Synthesis专用模型、provider、各阶段thinking level与温度覆盖、max_rounds。格式详见`.env.example`。
+内置`gemini-3.1-pro-deepthink-{minimal,low,medium,high,extra}`五档预设。通过`VIRTUAL_MODELS_FILE`指向JSON文件可新增或覆盖默认模型。每个虚拟模型可独立指定：实际模型、Manager/Synthesis专用模型、provider，以及更细粒度的 `manager_provider` / `expert_provider` / `synthesis_provider`，各阶段thinking level与温度覆盖、max_rounds。格式详见`.env.example`。
 
 ### 多Provider
 

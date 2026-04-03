@@ -58,6 +58,7 @@ async def generate_draft(
     expert_outputs: list[dict[str, str]],
     budget: int,
     temperature: float | None = None,
+    top_p: float | None = None,
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
@@ -88,6 +89,7 @@ async def generate_draft(
         "thinking_budget": budget,
         "image_parts": image_parts,
         "provider": provider,
+        "top_p": top_p,
     }
     if temperature is not None:
         kwargs["temperature"] = temperature

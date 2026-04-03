@@ -55,6 +55,7 @@ async def merge_operations(
     operations: list[DiffOperation],
     budget: int,
     temperature: float | None = None,
+    top_p: float | None = None,
     provider: str = "",
     enable_json_repair: bool = False,
     json_repair_model: str = "",
@@ -82,6 +83,7 @@ async def merge_operations(
             model=model,
             contents=prompt,
             temperature=temperature or 0.5,
+            top_p=top_p,
             thinking_budget=budget,
             provider=provider,
         )
@@ -100,6 +102,7 @@ async def merge_operations(
             enable_repair=enable_json_repair,
             repair_model=json_repair_model,
             provider=provider,
+            top_p=top_p,
         )
 
         decisions = []

@@ -136,6 +136,7 @@ async def _run_single_expert(
     query: str,
     context: str,
     budget: int,
+    top_p: float | None = None,
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
@@ -167,6 +168,7 @@ async def _run_single_expert(
                 contents=contents,
                 system_instruction=system_instruction,
                 temperature=temperature,
+                top_p=top_p,
                 thinking_budget=budget,
                 provider=provider,
             )
@@ -233,6 +235,7 @@ async def run_refinement_pipeline(
     syn_model: str,
     config: DeepThinkConfig,
     temperature: Optional[float],
+    top_p: float | None = None,
     system_prompt: str = "",
     image_parts: list[dict] | None = None,
     resume_checkpoint: DeepThinkCheckpoint | None = None,
@@ -277,6 +280,7 @@ async def run_refinement_pipeline(
                 query=query,
                 context=recent_history,
                 budget=expert_budget,
+                top_p=top_p,
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
                 provider=expert_provider,
@@ -368,6 +372,7 @@ async def run_refinement_pipeline(
                 if config.review_temperature is not None
                 else 0.7
             ),
+            top_p=top_p,
             user_system_prompt=system_prompt,
             image_parts=image_parts,
             provider=manager_provider,
@@ -394,6 +399,7 @@ async def run_refinement_pipeline(
                     if config.planning_temperature is not None
                     else temperature
                 ),
+                top_p=top_p,
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
                 provider=manager_provider,
@@ -461,6 +467,7 @@ async def run_refinement_pipeline(
                         if config.review_temperature is not None
                         else 0.7
                     ),
+                    top_p=top_p,
                     user_system_prompt=system_prompt,
                     image_parts=image_parts,
                     remaining_rounds=max(pre_draft_review_rounds - pre_draft_round, 0),
@@ -559,6 +566,7 @@ async def run_refinement_pipeline(
                     if config.synthesis_temperature is not None
                     else temperature
                 ),
+                top_p=top_p,
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
                 provider=expert_provider,
@@ -633,6 +641,7 @@ async def run_refinement_pipeline(
                         expert_config=cfg,
                         draft_lines_json=draft_lines_json,
                         budget=expert_budget,
+                        top_p=top_p,
                         guidance=review_analysis.expert_guidance.get(cfg.role, ""),
                         user_system_prompt=system_prompt,
                         image_parts=image_parts,
@@ -695,6 +704,7 @@ async def run_refinement_pipeline(
                         if config.synthesis_temperature is not None
                         else 0.5
                     ),
+                    top_p=top_p,
                     provider=synthesis_provider,
                     enable_json_repair=enable_json_repair,
                     json_repair_model=json_repair_model,
@@ -761,6 +771,7 @@ async def run_refinement_pipeline(
                     draft_lines_json=draft_lines_json,
                     budget=synthesis_budget,
                     max_line=len(draft_lines),
+                    top_p=top_p,
                     user_system_prompt=system_prompt,
                     provider=synthesis_provider,
                     json_via_prompt=config.json_via_prompt,

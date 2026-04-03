@@ -140,6 +140,36 @@ def get_provider_config(provider: str) -> ProviderConfig:
         provider, LLM_PROVIDER,
     )
     return PROVIDER_CONFIGS.get(LLM_PROVIDER, PROVIDER_CONFIGS["gemini"])
+
+
+def _load_default_top_p() -> float:
+    """加载全局默认 top_p，限制在 (0, 1] 区间。
+
+    环境变量：
+        DEFAULT_TOP_P: 默认 0.86。
+
+    Returns:
+        合法的 top_p 浮点值。
+    """
+    raw = os.getenv("DEFAULT_TOP_P", "0.86").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "[Config] Invalid DEFAULT_TOP_P=%r, fallback to 0.86",
+            raw,
+        )
+        return 0.86
+
+    if value <= 0.0 or value > 1.0:
+        logger.warning(
+            "[Config] DEFAULT_TOP_P out of range (0,1]: %s, fallback to 0.86",
+            value,
+        )
+        return 0.86
+    return value
+
+
 HOST: str = os.getenv("HOST", "0.0.0.0")
 PORT: int = int(os.getenv("PORT", "8000"))
 _SUPPORTED_APP_LANGUAGES = {"en", "zh"}
@@ -152,6 +182,8 @@ else:
         "[Config] Invalid APP_LANGUAGE=%r; falling back to 'en'",
         _APP_LANGUAGE_RAW,
     )
+
+DEFAULT_TOP_P: float = _load_default_top_p()
 
 # --- DeepThink 流水线配置（.env 可覆盖）---
 
@@ -177,6 +209,65 @@ SSE_HEARTBEAT_INTERVAL: int = int(os.getenv("SSE_HEARTBEAT_INTERVAL", "15"))
 # 流式响应中等待单个 chunk 的超时（秒），超过则认为上游已断开
 # 设为 0 表示不限制
 STREAM_CHUNK_TIMEOUT: float = float(os.getenv("STREAM_CHUNK_TIMEOUT", "300"))
+
+
+def _load_non_negative_int(name: str, default: int) -> int:
+    """加载非负整数环境变量，非法时回退默认值。"""
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("[Config] Invalid %s=%r, fallback to %d", name, raw, default)
+        return default
+    if value < 0:
+        logger.warning("[Config] %s must be >= 0, got %d, fallback to %d", name, value, default)
+        return default
+    return value
+
+
+# --- JSON 修复阶段专属调试 ---
+
+JSON_REPAIR_DEBUG_ENABLED: bool = os.getenv(
+    "JSON_REPAIR_DEBUG_ENABLED", "false"
+).lower() in ("true", "1", "yes")
+
+_json_repair_debug_dir_raw = os.getenv(
+    "JSON_REPAIR_DEBUG_DIR", "logs/json_repair_debug"
+)
+if os.path.isabs(_json_repair_debug_dir_raw):
+    JSON_REPAIR_DEBUG_DIR: str = _json_repair_debug_dir_raw
+else:
+    JSON_REPAIR_DEBUG_DIR = str(
+        (_BASE_DIR / _json_repair_debug_dir_raw).resolve()
+    )
+
+# 0 表示不截断，完整落盘
+JSON_REPAIR_DEBUG_MAX_CHARS: int = _load_non_negative_int(
+    "JSON_REPAIR_DEBUG_MAX_CHARS",
+    0,
+)
+
+# --- 文本清洗阶段专属调试 ---
+
+TEXT_CLEANER_DEBUG_ENABLED: bool = os.getenv(
+    "TEXT_CLEANER_DEBUG_ENABLED", "false"
+).lower() in ("true", "1", "yes")
+
+_text_cleaner_debug_dir_raw = os.getenv(
+    "TEXT_CLEANER_DEBUG_DIR", "logs/text_cleaner_debug"
+)
+if os.path.isabs(_text_cleaner_debug_dir_raw):
+    TEXT_CLEANER_DEBUG_DIR: str = _text_cleaner_debug_dir_raw
+else:
+    TEXT_CLEANER_DEBUG_DIR = str(
+        (_BASE_DIR / _text_cleaner_debug_dir_raw).resolve()
+    )
+
+# 0 表示不截断，完整落盘
+TEXT_CLEANER_DEBUG_MAX_CHARS: int = _load_non_negative_int(
+    "TEXT_CLEANER_DEBUG_MAX_CHARS",
+    0,
+)
 
 # --- Checkpoint / Resume ---
 _checkpoint_dir_raw = os.getenv("CHECKPOINT_DIR", "checkpoints")
@@ -405,6 +496,7 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         synthesis_model="gemini-3.1-pro-preview",
         json_repair_model="gemini-3-flash-preview",
         mode="refinement",
+        draft_model="claude-opus-4-6-thinking",
         planning_level="high",
         expert_level="high",
         synthesis_level="high",
@@ -421,6 +513,24 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         synthesis_model="gemini-3.1-pro-preview",
         json_repair_model="gemini-3-flash-preview",
         mode="refinement",
+        draft_model="claude-opus-4-6-thinking",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=2,
+        pre_draft_review_rounds=1,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-refinement-medium",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        draft_model="claude-opus-4-6-thinking",
         planning_level="high",
         expert_level="high",
         synthesis_level="high",
@@ -437,6 +547,7 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         synthesis_model="gemini-3.1-pro-preview",
         json_repair_model="gemini-3-flash-preview",
         mode="refinement",
+        draft_model="claude-opus-4-6-thinking",
         planning_level="high",
         expert_level="high",
         synthesis_level="high",
@@ -453,6 +564,7 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         synthesis_model="gemini-3.1-pro-preview",
         json_repair_model="gemini-3-flash-preview",
         mode="refinement",
+        draft_model="claude-opus-4-6-thinking",
         planning_level="high",
         expert_level="high",
         synthesis_level="high",
@@ -470,6 +582,7 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         synthesis_model="gemini-3-flash-preview",
         json_repair_model="gemini-3-flash-preview",
         mode="refinement",
+        draft_model="claude-opus-4-6-thinking",
         planning_level="high",
         expert_level="high",
         synthesis_level="high",

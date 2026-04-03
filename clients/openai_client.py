@@ -16,6 +16,7 @@ from typing import Any, AsyncGenerator, Optional
 from openai import AsyncOpenAI
 
 from config import (
+    DEFAULT_TOP_P,
     LLM_NETWORK_RETRIES,
     LLM_PROVIDER,
     LLM_REQUEST_DELAY_MAX,
@@ -369,6 +370,7 @@ def _chat_create_kwargs(
     model: str,
     messages: list[dict[str, Any]],
     temperature: Optional[float],
+    top_p: Optional[float],
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
@@ -377,6 +379,8 @@ def _chat_create_kwargs(
     }
     if temperature is not None:
         kwargs["temperature"] = temperature
+    effective_top_p = DEFAULT_TOP_P if top_p is None else top_p
+    kwargs["top_p"] = effective_top_p
     if extra:
         kwargs.update(extra)
     return kwargs
@@ -389,7 +393,9 @@ async def generate_json(
     response_schema: dict[str, Any],
     thinking_budget: int,
     temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
     image_parts: list[dict] | None = None,
+    debug_info: dict[str, Any] | None = None,
     *,
     provider: str = "",
     json_via_prompt: bool = False,
@@ -422,6 +428,7 @@ async def generate_json(
         model=model,
         messages=messages,
         temperature=temperature,
+        top_p=top_p,
         extra={
             "response_format": {
                 "type": "json_schema",
@@ -438,6 +445,7 @@ async def generate_json(
         model=model,
         messages=messages,
         temperature=temperature,
+        top_p=top_p,
         extra={"response_format": {"type": "json_object"}},
     )
 
@@ -455,6 +463,7 @@ async def generate_json(
         model=model,
         messages=fallback_messages,
         temperature=temperature,
+        top_p=top_p,
     )
 
     async def _strict_call():
@@ -503,6 +512,12 @@ async def generate_json(
     cleaned = _clean_json_string(raw_text or "{}")
     if cleaned != raw_text:
         logger.debug("[OpenAI] cleaned JSON:\n%s", cleaned)
+    if debug_info is not None:
+        debug_info["client"] = "openai"
+        debug_info["model"] = model
+        debug_info["provider"] = provider or LLM_PROVIDER
+        debug_info["raw_text"] = raw_text or ""
+        debug_info["cleaned_text"] = cleaned or ""
     return json.loads(cleaned)
 
 
@@ -511,6 +526,7 @@ async def generate_content(
     contents: str | list[Any],
     system_instruction: Optional[str] = None,
     temperature: float = 1.0,
+    top_p: Optional[float] = None,
     thinking_budget: int = 0,
     image_parts: list[dict] | None = None,
     *,
@@ -535,6 +551,7 @@ async def generate_content(
         model=model,
         messages=messages,
         temperature=temperature,
+        top_p=top_p,
     )
 
     async def _call():
@@ -562,6 +579,7 @@ async def generate_content_stream(
     contents: str | list[Any],
     system_instruction: Optional[str] = None,
     temperature: float = 1.0,
+    top_p: Optional[float] = None,
     thinking_budget: int = 0,
     image_parts: list[dict] | None = None,
     *,
@@ -586,6 +604,7 @@ async def generate_content_stream(
         model=model,
         messages=messages,
         temperature=temperature,
+        top_p=top_p,
         extra={"stream": True},
     )
 

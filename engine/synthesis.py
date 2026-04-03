@@ -22,6 +22,7 @@ async def stream_synthesis(
     review_results: list[ReviewResult],
     budget: int,
     temperature: float | None = None,
+    top_p: float | None = None,
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
@@ -52,6 +53,7 @@ async def stream_synthesis(
         "contents": prompt,
         "thinking_budget": budget,
         "image_parts": image_parts,
+        "top_p": top_p,
     }
     if temperature is not None:
         kwargs["temperature"] = temperature

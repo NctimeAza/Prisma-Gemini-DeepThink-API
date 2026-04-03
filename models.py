@@ -115,6 +115,8 @@ class DeepThinkConfig(BaseModel):
     expert_temperature: Optional[float] = None
     review_temperature: Optional[float] = None
     synthesis_temperature: Optional[float] = None
+    # 全流程采样 top_p（None 表示使用全局 DEFAULT_TOP_P）
+    top_p: Optional[float] = None
     # 开启后，对结构化 JSON 请求额外追加 prompt 级 JSON 约束（默认关闭）
     json_via_prompt: bool = False
     # --- 精修流程专用配置 ---
@@ -306,6 +308,7 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessageContent]
     stream: bool = False
     temperature: Optional[float] = None
+    top_p: Optional[float] = None
 
     # Prisma 扩展参数（非 OpenAI 标准）
     prisma_config: Optional[DeepThinkConfig] = None

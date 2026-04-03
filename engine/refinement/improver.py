@@ -26,6 +26,7 @@ async def run_improver(
     expert_config: RefinementExpertConfig,
     draft_lines_json: str,
     budget: int,
+    top_p: float | None = None,
     guidance: str = "",
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
@@ -76,6 +77,7 @@ async def run_improver(
                 contents=contents,
                 system_instruction=system_instruction,
                 temperature=expert_config.temperature,
+                top_p=top_p,
                 thinking_budget=budget,
                 provider=provider,
             )
@@ -108,6 +110,7 @@ async def run_improver(
                 enable_repair=enable_json_repair,
                 repair_model=json_repair_model,
                 provider=provider,
+                top_p=top_p,
             )
 
             operations = []

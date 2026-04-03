@@ -37,6 +37,7 @@ async def review_draft(
     refinement_round: int = 1,
     previous_summary: str = "",
     temperature: float | None = None,
+    top_p: float | None = None,
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
@@ -98,6 +99,7 @@ async def review_draft(
             model=model,
             contents=prompt,
             temperature=temperature or 0.7,
+            top_p=top_p,
             thinking_budget=budget,
             image_parts=image_parts,
             provider=provider,
@@ -117,6 +119,7 @@ async def review_draft(
             enable_repair=enable_json_repair,
             repair_model=json_repair_model,
             provider=provider,
+            top_p=top_p,
         )
 
         # 解析专家配置

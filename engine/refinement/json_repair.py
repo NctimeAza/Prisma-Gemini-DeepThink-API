@@ -17,6 +17,7 @@ from config import (
     JSON_REPAIR_DEBUG_ENABLED,
     JSON_REPAIR_DEBUG_MAX_CHARS,
 )
+from prompts import build_prefill_contents
 
 logger = logging.getLogger(__name__)
 
@@ -124,14 +125,17 @@ async def try_repair_json(
         修复后的 JSON 对象, 修复失败返回 None.
     """
     request_text = f"请修复以下 JSON：\n```\n{raw_text}\n```"
+    prefilled_contents = build_prefill_contents(
+        request_text,
+        leading_instruction=_REPAIR_SYSTEM_INSTRUCTION,
+    )
     raw_response = ""
     cleaned_response = ""
 
     try:
         content, _, _ = await generate_content(
             model=model,
-            contents=request_text,
-            system_instruction=_REPAIR_SYSTEM_INSTRUCTION,
+            contents=prefilled_contents,
             temperature=0.0,
             top_p=top_p,
             thinking_budget=thinking_budget,

@@ -52,6 +52,7 @@ class ExpertResult(BaseModel):
     id: str = ""
     role: str = ""
     description: str = ""
+    usage_dimension: str = ""
     temperature: float = 1.0
     prompt: str = ""
     status: Literal["pending", "thinking", "completed", "error"] = "pending"
@@ -119,6 +120,9 @@ class DeepThinkConfig(BaseModel):
     top_p: Optional[float] = None
     # 开启后，对结构化 JSON 请求额外追加 prompt 级 JSON 约束（默认关闭）
     json_via_prompt: bool = False
+    # 开启后，在 EXPERT_ENHANCE_COMPLIANCE_RESPONSE 后追加 forced 后缀。
+    # 该开关通常由请求模型名的 "-forced" 后缀触发。
+    forced_prefill_suffix: bool = False
     # --- 精修流程专用配置 ---
     refinement_max_rounds: int = 2  # 精修迭代轮数
     pre_draft_review_rounds: int = 1  # 初稿前额外审核轮数（0 表示禁用）
@@ -161,7 +165,7 @@ class DeepThinkCheckpoint(BaseModel):
     draft_content: str = ""  # 初稿内容
     refinement_round: int = 0  # 当前精修迭代轮数
     refinement_phase: RefinementPhase = "planning"  # 精修细粒度阶段
-    # 精修专家输出列表，每项为 {role, domain, content}
+    # 精修专家输出列表，每项为 {role, domain, dimension, content}
     refinement_expert_outputs: list[dict] = Field(default_factory=list)
     # 改进专家结果列表，每项为 {role, analysis, operations: [...]}
     refinement_improver_results: list[dict] = Field(default_factory=list)

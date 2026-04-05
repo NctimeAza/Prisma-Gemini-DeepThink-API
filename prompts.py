@@ -9,6 +9,7 @@
 
 import logging
 import os
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -121,6 +122,7 @@ _DEFAULT_MANAGER_REVIEW_SYSTEM_PROMPT = (
     "- 每个 <Expert> 节点都有 id/name/context_status 属性。\n"
     "- context_status=active：正常专家输出。\n"
     "- context_status=iterated 或 deleted：该专家旧输出已被移除，节点正文是之前审查留下的原因记录。\n\n"
+    "- <Expert> 节点可能包含 <Usage_Dimension> 子节点，表示该专家产出可用于最终目标的维度说明。\n\n"
     "审查原则：\n"
     "- 根据每个专家被分配的特定角色和职责来评估其表现。\n"
     "专家只负责提供某一维度的素材或观点，**最终综合与撰写正文由后续单独的综合阶段负责**。"
@@ -185,13 +187,13 @@ ROUNDS_ENCOURAGEMENT: str = _load_prompt(
 # ============================================================
 
 _DEFAULT_EXPERT_INSTRUCTION_TEMPLATE = (
+    "对话上下文如下：{context}\n\n"
     "【团队信息】当前已分配的所有专家角色：{all_experts}\n"
     "你是 {role}。你的特点是：{description}。\n"
     "你的首要职责是忠实服务于用户的请求。且注意避免越权处理团队中其它专家的负责事项。"
     "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
     "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n"
-    "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。\n"
-    "对话上下文如下：{context}"
+    "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。"
 )
 
 EXPERT_INSTRUCTION_TEMPLATE: str = _load_prompt(
@@ -234,11 +236,43 @@ EXPERT_ENHANCE_COMPLIANCE_RESPONSE: str = _load_prompt(
     "EXPERT_ENHANCE_COMPLIANCE_RESPONSE", _DEFAULT_EXPERT_ENHANCE_COMPLIANCE_RESPONSE
 )
 
+_DEFAULT_EXPERT_ENHANCE_COMPLIANCE_FORCED_SUFFIX = (
+    "\n<invisible_to_user>OK</invisible_to_user>"
+)
+
+EXPERT_ENHANCE_COMPLIANCE_FORCED_SUFFIX: str = _load_prompt(
+    "EXPERT_ENHANCE_COMPLIANCE_FORCED_SUFFIX",
+    _DEFAULT_EXPERT_ENHANCE_COMPLIANCE_FORCED_SUFFIX,
+)
+
 _DEFAULT_EXPERT_ENHANCE_COMPLIANCE_CONFIRM = "确认"
 
 EXPERT_ENHANCE_COMPLIANCE_CONFIRM: str = _load_prompt(
     "EXPERT_ENHANCE_COMPLIANCE_CONFIRM", _DEFAULT_EXPERT_ENHANCE_COMPLIANCE_CONFIRM
 )
+
+_FORCED_PREFILL_SUFFIX_ENABLED: ContextVar[bool] = ContextVar(
+    "forced_prefill_suffix_enabled",
+    default=False,
+)
+
+
+def set_forced_prefill_suffix_enabled(enabled: bool) -> Token:
+    """设置当前请求上下文是否启用 forced 预填充后缀。"""
+    return _FORCED_PREFILL_SUFFIX_ENABLED.set(bool(enabled))
+
+
+def reset_forced_prefill_suffix_enabled(token: Token) -> None:
+    """恢复 forced 预填充后缀开关。"""
+    _FORCED_PREFILL_SUFFIX_ENABLED.reset(token)
+
+
+def _compose_enhance_compliance_response() -> str:
+    """根据当前上下文拼接增强遵循回复。"""
+    base = EXPERT_ENHANCE_COMPLIANCE_RESPONSE
+    if _FORCED_PREFILL_SUFFIX_ENABLED.get():
+        return f"{base}{EXPERT_ENHANCE_COMPLIANCE_FORCED_SUFFIX}"
+    return base
 
 
 # ============================================================
@@ -451,8 +485,6 @@ def get_expert_system_instruction(
 ) -> str:
     """生成 Expert 的 system instruction.
 
-    用户指示放在前面，专家角色指示放在最后以保持最高优先级。
-
     Args:
         role: 专家角色名.
         description: 角色描述.
@@ -462,30 +494,31 @@ def get_expert_system_instruction(
     Returns:
         完整的 system prompt.
     """
-    parts = []
-    if user_system_prompt:
-        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
     roles = [r for r in (all_expert_roles or []) if r]
     if not roles:
         roles = [role]
-    parts.append(
+    parts = [
         EXPERT_INSTRUCTION_TEMPLATE.format(
             role=role,
             description=description,
             context=context,
             all_experts="、".join(dict.fromkeys(roles)),
         )
-    )
+    ]
+    if user_system_prompt:
+        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
     return "\n\n".join(parts)
 
 
 def build_expert_contents(
     task_prompt: str,
     image_parts: list[dict] | None = None,
+    leading_instruction: str = "",
 ) -> list[dict]:
     """构建 Expert 的多轮对话 contents，包含 prefill 确认轮.
 
     结构：
+      User: <专家/助手设定，可选>
       User: "请确认你已理解..."
       Model: "我已理解并将执行..."
       User: <实际任务 + 图片>
@@ -495,24 +528,58 @@ def build_expert_contents(
     Args:
         task_prompt: 专家的实际任务文本.
         image_parts: Gemini inlineData 格式的图片列表.
+        leading_instruction: 首条 user 设定文本（可选）.
 
     Returns:
         Gemini 多轮对话格式的 contents 列表.
     """
-    contents: list[dict] = [
-        # 第一轮：确认指示
-        {"role": "user", "parts": [{"text": EXPERT_PREFILL_PROMPT}]},
-        {"role": "model", "parts": [{"text": EXPERT_PREFILL_RESPONSE}]},
-    ]
+    return build_prefill_contents(
+        task_prompt,
+        image_parts=image_parts,
+        leading_instruction=leading_instruction,
+    )
 
-    # 第二轮：实际任务
+
+def build_prefill_contents(
+    task_prompt: str,
+    image_parts: list[dict] | None = None,
+    leading_instruction: str = "",
+) -> list[dict]:
+    """构建通用 prefill 多轮对话 contents.
+
+    结构：
+      User: <设定文本，可选>
+      User: "请确认你已理解..."
+      Model: "我已理解并将执行..."
+      User: <实际任务 + 图片>
+      Model: <确认理解最新要求，等待用户确认>
+      User: "确认"
+
+    Args:
+        task_prompt: 任务文本.
+        image_parts: Gemini inlineData 格式的图片列表.
+        leading_instruction: 首条 user 设定文本（可选）.
+
+    Returns:
+        Gemini 多轮对话格式的 contents 列表.
+    """
+    contents: list[dict] = []
+    if leading_instruction:
+        # 第一轮：设定文本（下放到 user role）
+        contents.append({"role": "user", "parts": [{"text": leading_instruction}]})
+
+    # 第二轮：确认指示
+    contents.append({"role": "user", "parts": [{"text": EXPERT_PREFILL_PROMPT}]})
+    contents.append({"role": "model", "parts": [{"text": EXPERT_PREFILL_RESPONSE}]})
+
+    # 第三轮：实际任务
     task_parts: list[dict] = [{"text": task_prompt}]
     if image_parts:
         task_parts.extend(image_parts)
     contents.append({"role": "user", "parts": task_parts})
 
-    # 第三轮：遵循增强确认
-    contents.append({"role": "model", "parts": [{"text": EXPERT_ENHANCE_COMPLIANCE_RESPONSE}]})
+    # 第四轮：遵循增强确认
+    contents.append({"role": "model", "parts": [{"text": _compose_enhance_compliance_response()}]})
     contents.append({"role": "user", "parts": [{"text": EXPERT_ENHANCE_COMPLIANCE_CONFIRM}]})
 
     return contents
@@ -591,12 +658,12 @@ def get_synthesis_prompt(
         )
 
     return (
-        f"{SYNTHESIS_ROLE}{user_instruction}\n\n"
         f"上下文：\n{recent_history}\n\n"
         f"用户原始查询：\"{query}\"\n\n"
         f"以下是你专家团队的分析结果"
         f"（可能跨越多个优化轮次）：\n"
         f"{expert_outputs}\n\n"
+        f"{SYNTHESIS_ROLE}{user_instruction}\n\n"
         f"{SYNTHESIS_TASK_INSTRUCTIONS}"
     )
 
@@ -645,6 +712,7 @@ REFINEMENT_PLANNER_PROMPT: str = _load_prompt(
 # --- 专家互感知注入模板 ---
 
 _DEFAULT_REFINEMENT_EXPERT_INJECTION = (
+    "对话上下文如下：{context}\n\n"
     "【团队信息】当前已分配的所有专家角色：{all_experts}\n"
     "你是「{role}」专家。你严格只负责：{domain}\n"
     "无需越权干涉其他专家的职责范围。你的回复用户看不到，只需根据自身特长直入主题给出必要的回复。\n"
@@ -652,12 +720,24 @@ _DEFAULT_REFINEMENT_EXPERT_INJECTION = (
     "你的首要职责是忠实服务于用户的请求。"
     "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
     "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n"
-    "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。\n"
-    "对话上下文如下：{context}"
+    "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。"
 )
 
 REFINEMENT_EXPERT_INJECTION: str = _load_prompt(
     "REFINEMENT_EXPERT_INJECTION", _DEFAULT_REFINEMENT_EXPERT_INJECTION
+)
+
+_DEFAULT_REFINEMENT_EXPERT_OUTPUT_RULES = (
+    "输出要求：\n"
+    "1. 只输出 JSON 对象，不要输出 markdown 代码块或额外解释文字。\n"
+    "2. JSON 必须包含两个字符串字段：\n"
+    "   - dimension: 简述本次产出可在用户最终目标中的哪个维度被使用。\n"
+    "   - content: 专家领域产出正文。\n"
+    "3. dimension 和 content 都必须为非空字符串。"
+)
+
+REFINEMENT_EXPERT_OUTPUT_RULES: str = _load_prompt(
+    "REFINEMENT_EXPERT_OUTPUT_RULES", _DEFAULT_REFINEMENT_EXPERT_OUTPUT_RULES
 )
 
 # --- 初稿生成 ---
@@ -681,7 +761,7 @@ REFINEMENT_DRAFT_PROMPT: str = _load_prompt(
 
 _DEFAULT_REFINEMENT_REVIEW_PROMPT = (
     "你是精修审查助手。你将收到初稿的按行切分内容（JSON数组格式），"
-    "以及用户的原始需求。\n\n"
+    "以及用户的原始需求与对话上下文（若有）。\n\n"
     "你的任务：\n"
     "1. 仔细分析初稿中存在的违反用户需求、质量不佳、可以改进的地方。\n"
     "2. 分配多个改进专家，每个专家负责特定维度的修补工作。\n"
@@ -713,6 +793,7 @@ REFINEMENT_REVIEW_PROMPT: str = _load_prompt(
 # --- 改进专家 ---
 
 _DEFAULT_REFINEMENT_IMPROVER_INJECTION = (
+    "对话上下文如下：{context}\n\n"
     "【改进团队信息】当前已分配的所有改进专家角色：{all_experts}\n"
     "你是「{role}」改进专家。你只负责：{domain}\n"
     "无须越权修改其他专家负责范围内的内容。\n\n"
@@ -780,7 +861,7 @@ REFINEMENT_MERGE_PROMPT: str = _load_prompt(
 # --- 文本清洗专家（末端去相邻重复） ---
 
 _DEFAULT_REFINEMENT_CLEANER_PROMPT = (
-    "你是文本清洗专家。你将收到用户原始需求、用户的重要指示（若有），以及一份按行切分的正文（JSON 数组）。\n\n"
+    "你是文本清洗专家。你将收到对话上下文（若有）、用户原始需求、用户的重要指示（若有），以及一份按行切分的正文（JSON 数组）。\n\n"
     "你的任务：检查正文中是否存在由于精修 diff 流程瑕疵导致的“相邻重复/近重复句子或段落”。\n"
     "仅处理相邻重复（可忽略空行，即把空行视为不打断相邻关系）。不要做全局去重。\n\n"
     "输出要求（非常重要）：\n"
@@ -999,21 +1080,22 @@ def get_refinement_expert_system_instruction(
     Returns:
         完整的 system prompt.
     """
-    parts = []
-    if user_system_prompt:
-        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
-    parts.append(
+    parts = [
         REFINEMENT_EXPERT_INJECTION.format(
             role=role, domain=domain, context=context,
             all_experts="、".join(all_expert_roles),
-        )
-    )
+        ),
+        REFINEMENT_EXPERT_OUTPUT_RULES,
+    ]
+    if user_system_prompt:
+        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
     return "\n\n".join(parts)
 
 
 def build_refinement_expert_contents(
     task_prompt: str,
     image_parts: list[dict] | None = None,
+    leading_instruction: str = "",
 ) -> list[dict]:
     """构建精修流程 Expert 的多轮对话 contents，复用 prefill 确认轮.
 
@@ -1023,16 +1105,22 @@ def build_refinement_expert_contents(
     Args:
         task_prompt: 专家的实际任务文本.
         image_parts: Gemini inlineData 格式的图片列表.
+        leading_instruction: 首条 user 设定文本（可选）.
 
     Returns:
         Gemini 多轮对话格式的 contents 列表.
     """
     # 复用与经典流程相同的 prefill 逻辑
-    return build_expert_contents(task_prompt, image_parts=image_parts)
+    return build_expert_contents(
+        task_prompt,
+        image_parts=image_parts,
+        leading_instruction=leading_instruction,
+    )
 
 
 def get_refinement_improver_system_instruction(
     role: str, domain: str,
+    context: str,
     all_expert_roles: list[str],
     guidance: str = "",
     user_system_prompt: str = "",
@@ -1042,6 +1130,7 @@ def get_refinement_improver_system_instruction(
     Args:
         role: 改进专家角色名.
         domain: 严格负责领域.
+        context: 对话上下文.
         all_expert_roles: 所有已分配改进专家角色列表.
         guidance: 审查模型给的额外指导.
         user_system_prompt: 下游客户端的 system prompt.
@@ -1049,14 +1138,15 @@ def get_refinement_improver_system_instruction(
     Returns:
         完整的 system prompt.
     """
-    parts = []
-    if user_system_prompt:
-        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
-    parts.append(
+    parts = [
         REFINEMENT_IMPROVER_INJECTION.format(
-            role=role, domain=domain,
+            role=role,
+            domain=domain,
+            context=context,
             all_experts="、".join(all_expert_roles),
             guidance=guidance or "无额外指导。",
         )
-    )
+    ]
+    if user_system_prompt:
+        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
     return "\n\n".join(parts)

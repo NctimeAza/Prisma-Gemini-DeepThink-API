@@ -98,7 +98,7 @@ async def _random_delay() -> None:
 async def generate_json(
     model: str,
     contents: str | list[Any],
-    system_instruction: str,
+    system_instruction: Optional[str],
     response_schema: dict[str, Any],
     thinking_budget: int,
     temperature: Optional[float] = None,
@@ -131,11 +131,12 @@ async def generate_json(
         contents = _build_contents(contents, image_parts)
 
     config_dict: dict[str, Any] = {
-        "system_instruction": system_instruction,
         "response_mime_type": "application/json",
         "response_schema": response_schema,
         "tools": [types.Tool(google_search=types.GoogleSearch())],
     }
+    if system_instruction:
+        config_dict["system_instruction"] = system_instruction
     if temperature is not None:
         config_dict["temperature"] = temperature
     config_dict["top_p"] = DEFAULT_TOP_P if top_p is None else top_p

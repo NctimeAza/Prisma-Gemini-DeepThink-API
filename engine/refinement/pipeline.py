@@ -5,10 +5,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
-from typing import Optional
+import uuid
+from pathlib import Path
+from typing import Any, Optional
 
-from config import LLM_NETWORK_RETRIES, LLM_PROVIDER, StageProviders, get_thinking_budget
+from config import (
+    LLM_NETWORK_RETRIES,
+    LLM_PROVIDER,
+    REFINEMENT_EXPERT_REQUEST_DEBUG_DIR,
+    REFINEMENT_EXPERT_REQUEST_DEBUG_ENABLED,
+    REFINEMENT_EXPERT_REQUEST_DEBUG_MAX_CHARS,
+    StageProviders,
+    get_thinking_budget,
+)
 from clients.llm_client import generate_content
 from engine import manager
 from engine.orchestrator import _apply_review_actions
@@ -60,6 +71,108 @@ def _now_ts() -> int:
     return int(time.time())
 
 
+def _truncate_debug_text(text: str) -> tuple[str, bool]:
+    """按配置截断调试字符串。"""
+    limit = REFINEMENT_EXPERT_REQUEST_DEBUG_MAX_CHARS
+    if limit == 0 or len(text) <= limit:
+        return text, False
+    omitted = len(text) - limit
+    tail = f"\n\n[TRUNCATED] omitted_chars={omitted}"
+    return text[:limit] + tail, True
+
+
+def _truncate_debug_value(value: Any) -> tuple[Any, bool]:
+    """按配置递归截断调试对象中的长字符串。"""
+    if isinstance(value, str):
+        return _truncate_debug_text(value)
+    if isinstance(value, list):
+        truncated_any = False
+        new_list: list[Any] = []
+        for item in value:
+            new_item, item_truncated = _truncate_debug_value(item)
+            truncated_any = truncated_any or item_truncated
+            new_list.append(new_item)
+        return new_list, truncated_any
+    if isinstance(value, dict):
+        truncated_any = False
+        new_dict: dict[str, Any] = {}
+        for k, v in value.items():
+            new_v, v_truncated = _truncate_debug_value(v)
+            truncated_any = truncated_any or v_truncated
+            new_dict[str(k)] = new_v
+        return new_dict, truncated_any
+    return value, False
+
+
+def _dump_refinement_expert_request_debug(
+    *,
+    model: str,
+    provider: str,
+    expert_cfg: RefinementExpertConfig,
+    query: str,
+    context: str,
+    task_prompt: str,
+    leading_instruction: str,
+    contents: list[dict],
+    temperature: float,
+    top_p: float | None,
+    budget: int,
+    user_system_prompt: str,
+) -> None:
+    """落盘初始专家请求，便于离线复现外审触发条件。"""
+    if not REFINEMENT_EXPERT_REQUEST_DEBUG_ENABLED:
+        return
+
+    try:
+        root = Path(REFINEMENT_EXPERT_REQUEST_DEBUG_DIR)
+        root.mkdir(parents=True, exist_ok=True)
+
+        ts = int(time.time() * 1000)
+        run_id = f"{ts}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        bundle_dir = root / run_id
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "provider": provider,
+            "temperature": temperature,
+            "top_p": top_p,
+            "thinking_budget": budget,
+            "query": query,
+            "context": context,
+            "task_prompt": task_prompt,
+            "user_system_prompt": user_system_prompt,
+            "expert_config": expert_cfg.model_dump(mode="json"),
+            "request": {
+                "system_instruction": "",
+                "leading_instruction": leading_instruction,
+                "contents": contents,
+            },
+        }
+        payload_dump, payload_truncated = _truncate_debug_value(payload)
+
+        meta = {
+            "expert_role": expert_cfg.role,
+            "expert_domain": expert_cfg.domain,
+            "payload_truncated": payload_truncated,
+            "created_at_ms": ts,
+        }
+        (bundle_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (bundle_dir / "request.json").write_text(
+            json.dumps(payload_dump, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(
+            "[RefinementExpert][Debug] request dump saved: %s",
+            bundle_dir,
+        )
+    except Exception as dump_err:
+        logger.warning("[RefinementExpert][Debug] request dump failed: %s", dump_err)
+
+
 def _upsert_review(reviews: list[ReviewResult], review: ReviewResult) -> None:
     for idx, existing in enumerate(reviews):
         if existing.round == review.round:
@@ -91,6 +204,7 @@ def _outputs_to_expert_results(
             id=f"refinement-r{round_no}-{idx}",
             role=item.get("role", f"expert-{idx}"),
             description=item.get("domain", ""),
+            usage_dimension=item.get("dimension", ""),
             temperature=1.0,
             prompt="",
             status="completed",
@@ -107,7 +221,12 @@ def _collect_draft_inputs(
     query: str,
 ) -> list[dict[str, str]]:
     active_outputs = [
-        {"role": exp.role, "domain": exp.description, "content": exp.content}
+        {
+            "role": exp.role,
+            "domain": exp.description,
+            "dimension": exp.usage_dimension,
+            "content": exp.content,
+        }
         for exp in experts
         if exp.context_status == "active" and (exp.content or "").strip()
     ]
@@ -117,7 +236,12 @@ def _collect_draft_inputs(
     rounds = sorted({exp.round for exp in experts}, reverse=True)
     for round_no in rounds:
         round_outputs = [
-            {"role": exp.role, "domain": exp.description, "content": exp.content}
+            {
+                "role": exp.role,
+                "domain": exp.description,
+                "dimension": exp.usage_dimension,
+                "content": exp.content,
+            }
             for exp in experts
             if exp.round == round_no and (exp.content or "").strip()
         ]
@@ -127,7 +251,7 @@ def _collect_draft_inputs(
     if fallback_outputs:
         return fallback_outputs
 
-    return [{"role": "fallback", "domain": "", "content": query}]
+    return [{"role": "fallback", "domain": "", "dimension": "", "content": query}]
 
 
 async def _run_single_expert(
@@ -142,7 +266,7 @@ async def _run_single_expert(
     provider: str = "",
     forced_temperature: float | None = None,
 ) -> dict[str, str]:
-    """Run one refinement expert and return {role, domain, content}."""
+    """Run one refinement expert and return {role, domain, dimension, content}."""
     system_instruction = get_refinement_expert_system_instruction(
         role=expert_cfg.role,
         domain=expert_cfg.domain,
@@ -155,10 +279,25 @@ async def _run_single_expert(
     contents = build_refinement_expert_contents(
         task_prompt,
         image_parts=image_parts,
+        leading_instruction=system_instruction,
     )
 
     temperature = (
         forced_temperature if forced_temperature is not None else expert_cfg.temperature
+    )
+    _dump_refinement_expert_request_debug(
+        model=model,
+        provider=provider,
+        expert_cfg=expert_cfg,
+        query=query,
+        context=context,
+        task_prompt=task_prompt,
+        leading_instruction=system_instruction,
+        contents=contents,
+        temperature=temperature,
+        top_p=top_p,
+        budget=budget,
+        user_system_prompt=user_system_prompt,
     )
 
     for attempt in range(LLM_NETWORK_RETRIES + 1):
@@ -166,17 +305,60 @@ async def _run_single_expert(
             full_content, _, _ = await generate_content(
                 model=model,
                 contents=contents,
-                system_instruction=system_instruction,
                 temperature=temperature,
                 top_p=top_p,
                 thinking_budget=budget,
                 provider=provider,
             )
-            if full_content.strip():
+
+            text = (full_content or "").strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                text = "\n".join(lines).strip()
+
+            parsed: dict | None = None
+            if text:
+                try:
+                    candidate = json.loads(text)
+                    if isinstance(candidate, dict):
+                        parsed = candidate
+                except json.JSONDecodeError:
+                    parsed = None
+
+            if parsed is not None:
+                dimension = str(parsed.get("dimension", "")).strip()
+                content = str(parsed.get("content", "")).strip()
+                if content:
+                    return {
+                        "role": expert_cfg.role,
+                        "domain": expert_cfg.domain,
+                        "dimension": dimension or expert_cfg.domain,
+                        "content": content,
+                    }
+                # 已取消 API 级 JSON 约束后，不应因字段缺失反复重试烧 token。
+                # 尝试兼容常见字段；若仍为空则回退为原始文本。
+                fallback_content = (
+                    str(parsed.get("text", "")).strip()
+                    or str(parsed.get("output", "")).strip()
+                    or str(parsed.get("answer", "")).strip()
+                    or text
+                )
                 return {
                     "role": expert_cfg.role,
                     "domain": expert_cfg.domain,
-                    "content": full_content,
+                    "dimension": dimension or expert_cfg.domain,
+                    "content": fallback_content,
+                }
+            elif text:
+                # 非 JSON 文本视为正常专家正文，直接接收，避免高成本重复调用。
+                return {
+                    "role": expert_cfg.role,
+                    "domain": expert_cfg.domain,
+                    "dimension": expert_cfg.domain,
+                    "content": text,
                 }
 
             if attempt < LLM_NETWORK_RETRIES:
@@ -193,12 +375,13 @@ async def _run_single_expert(
             return {
                 "role": expert_cfg.role,
                 "domain": expert_cfg.domain,
+                "dimension": expert_cfg.domain,
                 "content": "(expert generated empty output)",
             }
 
         except Exception as exc:
             status = extract_status(exc)
-            retryable = is_retryable_error(status)
+            retryable = is_retryable_error(status) or status is None
             if retryable and attempt < LLM_NETWORK_RETRIES:
                 delay = 1.5 * (attempt + 1)
                 logger.warning(
@@ -216,12 +399,14 @@ async def _run_single_expert(
             return {
                 "role": expert_cfg.role,
                 "domain": expert_cfg.domain,
+                "dimension": expert_cfg.domain,
                 "content": f"(expert execution failed: {exc})",
             }
 
     return {
         "role": expert_cfg.role,
         "domain": expert_cfg.domain,
+        "dimension": expert_cfg.domain,
         "content": "(expert retries exhausted)",
     }
 
@@ -367,6 +552,7 @@ async def run_refinement_pipeline(
             budget=planning_budget,
             refinement_round=round_no,
             previous_summary=previous_merge_summary,
+            context=recent_history,
             temperature=(
                 config.review_temperature
                 if config.review_temperature is not None
@@ -425,13 +611,21 @@ async def run_refinement_pipeline(
             approved_outputs = await _run_expert_batch(expert_configs)
 
             if not approved_outputs:
-                approved_outputs = [{"role": "fallback", "domain": "", "content": query}]
+                approved_outputs = [
+                    {
+                        "role": "fallback",
+                        "domain": "",
+                        "dimension": "",
+                        "content": query,
+                    }
+                ]
 
             if resume_checkpoint:
                 resume_checkpoint.refinement_expert_outputs = [
                     {
                         "role": item["role"],
                         "domain": item.get("domain", ""),
+                        "dimension": item.get("dimension", ""),
                         "content": item["content"],
                     }
                     for item in approved_outputs
@@ -444,7 +638,14 @@ async def run_refinement_pipeline(
             pre_draft_experts = _outputs_to_expert_results(approved_outputs, round_no=1)
             if not pre_draft_experts:
                 pre_draft_experts = _outputs_to_expert_results(
-                    [{"role": "fallback", "domain": "", "content": query}],
+                    [
+                        {
+                            "role": "fallback",
+                            "domain": "",
+                            "dimension": "",
+                            "content": query,
+                        }
+                    ],
                     round_no=1,
                 )
 
@@ -542,6 +743,7 @@ async def run_refinement_pipeline(
                     {
                         "role": item["role"],
                         "domain": item.get("domain", ""),
+                        "dimension": item.get("dimension", ""),
                         "content": item["content"],
                     }
                     for item in approved_outputs
@@ -549,7 +751,14 @@ async def run_refinement_pipeline(
                 resume_checkpoint.updated_at = _now_ts()
 
         if not approved_outputs:
-            approved_outputs = [{"role": "fallback", "domain": "", "content": query}]
+            approved_outputs = [
+                {
+                    "role": "fallback",
+                    "domain": "",
+                    "dimension": "",
+                    "content": query,
+                }
+            ]
 
         if not _should_skip("draft"):
             _set_refinement_phase("draft")
@@ -639,6 +848,7 @@ async def run_refinement_pipeline(
                     improver.run_improver(
                         model=model,
                         expert_config=cfg,
+                        context=recent_history,
                         draft_lines_json=draft_lines_json,
                         budget=expert_budget,
                         top_p=top_p,
@@ -770,6 +980,7 @@ async def run_refinement_pipeline(
                     query=query,
                     draft_lines_json=draft_lines_json,
                     budget=synthesis_budget,
+                    context=recent_history,
                     max_line=len(draft_lines),
                     top_p=top_p,
                     user_system_prompt=system_prompt,

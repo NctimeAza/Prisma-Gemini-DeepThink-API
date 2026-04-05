@@ -389,7 +389,7 @@ def _chat_create_kwargs(
 async def generate_json(
     model: str,
     contents: str | list[Any],
-    system_instruction: str,
+    system_instruction: Optional[str],
     response_schema: dict[str, Any],
     thinking_budget: int,
     temperature: Optional[float] = None,

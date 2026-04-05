@@ -10,7 +10,7 @@ from typing import Any
 
 from clients.llm_client import generate_json
 from models import RefinementExpertConfig
-from prompts import REFINEMENT_PLANNER_PROMPT
+from prompts import REFINEMENT_PLANNER_PROMPT, build_prefill_contents
 
 logger = logging.getLogger(__name__)
 
@@ -74,17 +74,22 @@ async def plan(
         f"\n用户的重要指示：{user_system_prompt}" if user_system_prompt else ""
     )
     text_prompt = f'Context:\n{context}{sys_section}\n\nCurrent Query: "{query}"'
+    contents = build_prefill_contents(
+        text_prompt,
+        image_parts=image_parts,
+        leading_instruction=REFINEMENT_PLANNER_PROMPT,
+    )
 
     try:
         result = await generate_json(
             model=model,
-            contents=text_prompt,
-            system_instruction=REFINEMENT_PLANNER_PROMPT,
+            contents=contents,
+            system_instruction="",
             response_schema=REFINEMENT_PLANNING_SCHEMA,
             thinking_budget=budget,
             temperature=temperature,
             top_p=top_p,
-            image_parts=image_parts,
+            image_parts=None,
             provider=provider,
             json_via_prompt=json_via_prompt,
         )

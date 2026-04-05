@@ -39,6 +39,8 @@ from prompts import (
     SYNTHESIS_FALLBACK_TEXT,
     REFINEMENT_FALLBACK_TEXT,
     format_expert_task,
+    reset_forced_prefill_suffix_enabled,
+    set_forced_prefill_suffix_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,10 +179,16 @@ def _build_iteration_prompt(
     )
     task_part = base_prompt.strip() or "输出对目标专家回答的高质量改写和增强版本。"
     source_part = _truncate_for_iteration_context(previous_content or "（无输出）")
+    dimension_part = (
+        f"【上一轮可用维度】\n{target_expert.usage_dimension}\n\n"
+        if (target_expert.usage_dimension or "").strip()
+        else ""
+    )
 
     return (
         "你是被指派来进行“专家迭代改进”的新专家。\n"
         f"目标专家：{target_expert.role}（id={target_expert.id}）\n\n"
+        f"{dimension_part}"
         "【上一轮目标专家原回复】\n"
         f"{source_part}\n\n"
         "【审查模型严厉指令】\n"
@@ -730,6 +738,10 @@ async def run_deep_think(
     if not query.strip():
         return
 
+    prefill_suffix_token = set_forced_prefill_suffix_enabled(
+        config.forced_prefill_suffix
+    )
+
     if resume_checkpoint:
         resume_checkpoint.status = "running"
         resume_checkpoint.error_message = ""
@@ -864,3 +876,4 @@ async def run_deep_think(
             await pipeline_task
         except asyncio.CancelledError:
             pass
+        reset_forced_prefill_suffix_enabled(prefill_suffix_token)

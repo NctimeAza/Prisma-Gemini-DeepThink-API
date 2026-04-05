@@ -33,6 +33,7 @@ from config import (
     StageProviders,
     resolve_model,
     resolve_refinement_config,
+    split_forced_model_suffix,
 )
 from engine.checkpoint_store import CheckpointStore, CheckpointStoreError
 from engine.orchestrator import SYNTHESIS_FALLBACK_TEXT, run_deep_think
@@ -138,6 +139,7 @@ def _repair_legacy_completed_checkpoint(checkpoint: DeepThinkCheckpoint) -> bool
 def _resolve_request_config(
     model_id: str,
 ) -> tuple[str, str, str, DeepThinkConfig, str, StageProviders]:
+    base_model_id, forced_prefill_suffix = split_forced_model_suffix(model_id)
     (
         real_model, mgr_model, syn_model,
         p_level, e_level, s_level,
@@ -151,7 +153,7 @@ def _resolve_request_config(
     refinement_kwargs: dict[str, Any] = {}
     if mode == "refinement":
         ref_cfg = resolve_refinement_config(
-            model_id, real_model, mgr_model, syn_model,
+            base_model_id, real_model, mgr_model, syn_model,
         )
         refinement_kwargs = {
             "refinement_max_rounds": ref_cfg.refinement_max_rounds,
@@ -177,6 +179,7 @@ def _resolve_request_config(
         review_temperature=review_temp,
         synthesis_temperature=synthesis_temp,
         json_via_prompt=json_via_prompt,
+        forced_prefill_suffix=forced_prefill_suffix,
         **refinement_kwargs,
     )
     return real_model, mgr_model, syn_model, config, provider, stage_providers

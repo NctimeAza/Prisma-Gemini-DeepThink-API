@@ -10,7 +10,7 @@ import logging
 from clients.llm_client import generate_content
 from engine.refinement.json_repair import parse_json_with_repair
 from models import DiffOperation, MergeDecision, MergeResult
-from prompts import REFINEMENT_MERGE_PROMPT
+from prompts import REFINEMENT_MERGE_PROMPT, build_prefill_contents
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +77,12 @@ async def merge_operations(
     """
     content_prompt = _format_operations_for_merge(draft_text, operations)
     prompt = f"{REFINEMENT_MERGE_PROMPT}\n\n{content_prompt}"
+    contents = build_prefill_contents(prompt)
 
     try:
         raw_content, _, _ = await generate_content(
             model=model,
-            contents=prompt,
+            contents=contents,
             temperature=temperature or 0.5,
             top_p=top_p,
             thinking_budget=budget,

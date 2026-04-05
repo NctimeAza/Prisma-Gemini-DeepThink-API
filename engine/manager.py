@@ -10,7 +10,12 @@ from typing import Any
 
 from clients.llm_client import generate_json
 from models import AnalysisResult, ExpertResult, ReviewResult
-from prompts import MANAGER_SYSTEM_PROMPT, MANAGER_REVIEW_SYSTEM_PROMPT, ROUNDS_ENCOURAGEMENT
+from prompts import (
+    MANAGER_SYSTEM_PROMPT,
+    MANAGER_REVIEW_SYSTEM_PROMPT,
+    ROUNDS_ENCOURAGEMENT,
+    build_prefill_contents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -186,9 +191,15 @@ def _truncate_expert_content(content: str, max_len: int = 20000) -> str:
 
 def _render_expert_node(expert: ExpertResult) -> str:
     content = _truncate_expert_content(expert.content or "（无输出）")
+    dimension = (expert.usage_dimension or "").strip()
+    dimension_part = (
+        f"  <Usage_Dimension>{dimension}</Usage_Dimension>\n"
+        if dimension else ""
+    )
     return (
         f'  <Expert id="{expert.id}" name="{expert.role}" '
         f'context_status="{expert.context_status}">\n'
+        f"{dimension_part}"
         f"{content}\n"
         "  </Expert>"
     )
@@ -223,17 +234,22 @@ async def analyze(
         f"\n用户的重要指示：{user_system_prompt}" if user_system_prompt else ""
     )
     text_prompt = f'Context:\n{context}{sys_section}\n\nCurrent Query: "{query}"'
+    contents = build_prefill_contents(
+        text_prompt,
+        image_parts=image_parts,
+        leading_instruction=MANAGER_SYSTEM_PROMPT,
+    )
 
     try:
         result = await generate_json(
             model=model,
-            contents=text_prompt,
-            system_instruction=MANAGER_SYSTEM_PROMPT,
+            contents=contents,
+            system_instruction="",
             response_schema=ANALYSIS_SCHEMA,
             thinking_budget=budget,
             temperature=temperature,
             top_p=top_p,
-            image_parts=image_parts,
+            image_parts=None,
             provider=provider,
             json_via_prompt=json_via_prompt,
         )
@@ -361,17 +377,22 @@ async def review(
         f'用户查询："{query}"\n\n'
         f"当前专家输出：\n{expert_outputs}"
     )
+    contents = build_prefill_contents(
+        content,
+        image_parts=image_parts,
+        leading_instruction=MANAGER_REVIEW_SYSTEM_PROMPT,
+    )
 
     try:
         result = await generate_json(
             model=model,
-            contents=content,
-            system_instruction=MANAGER_REVIEW_SYSTEM_PROMPT,
+            contents=contents,
+            system_instruction="",
             response_schema=REVIEW_SCHEMA,
             thinking_budget=budget,
             temperature=temperature,
             top_p=top_p,
-            image_parts=image_parts,
+            image_parts=None,
             provider=provider,
             json_via_prompt=json_via_prompt,
         )

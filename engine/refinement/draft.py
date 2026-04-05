@@ -7,7 +7,7 @@
 import logging
 
 from clients.llm_client import generate_content
-from prompts import REFINEMENT_DRAFT_PROMPT
+from prompts import REFINEMENT_DRAFT_PROMPT, build_prefill_contents
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ def _build_draft_prompt(
     Args:
         query: 用户原始问题.
         context: 对话上下文.
-        expert_outputs: 专家输出列表, 每项含 role/domain/content.
+        expert_outputs: 专家输出列表, 每项含 role/domain/dimension/content.
         user_system_prompt: 用户 system prompt.
 
     Returns:
@@ -31,8 +31,14 @@ def _build_draft_prompt(
     """
     expert_xml_parts = []
     for exp in expert_outputs:
+        dimension = (exp.get("dimension") or "").strip()
+        dimension_block = (
+            f"    <UsageDimension>{dimension}</UsageDimension>\n"
+            if dimension else ""
+        )
         expert_xml_parts.append(
             f'  <Expert name="{exp["role"]}" domain="{exp["domain"]}">\n'
+            f"{dimension_block}"
             f'{exp["content"]}\n'
             "  </Expert>"
         )
@@ -43,11 +49,11 @@ def _build_draft_prompt(
         user_instruction = f"\n\n用户的重要指示：\n{user_system_prompt}"
 
     return (
-        f"{REFINEMENT_DRAFT_PROMPT}{user_instruction}\n\n"
         f"对话上下文：\n{context}\n\n"
         f'用户原始需求："{query}"\n\n'
         f"以下是各专家提供的领域素材：\n"
-        f"{experts_xml}"
+        f"{experts_xml}\n\n"
+        f"{REFINEMENT_DRAFT_PROMPT}{user_instruction}"
     )
 
 
@@ -82,12 +88,13 @@ async def generate_draft(
     prompt = _build_draft_prompt(
         query, context, expert_outputs, user_system_prompt,
     )
+    contents = build_prefill_contents(prompt, image_parts=image_parts)
 
     kwargs: dict = {
         "model": model,
-        "contents": prompt,
+        "contents": contents,
         "thinking_budget": budget,
-        "image_parts": image_parts,
+        "image_parts": None,
         "provider": provider,
         "top_p": top_p,
     }

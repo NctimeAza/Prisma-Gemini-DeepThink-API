@@ -21,7 +21,7 @@ from config import (
     TEXT_CLEANER_DEBUG_MAX_CHARS,
 )
 from models import DiffOperation
-from prompts import REFINEMENT_CLEANER_PROMPT
+from prompts import REFINEMENT_CLEANER_PROMPT, build_prefill_contents
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +245,7 @@ async def run_text_cleaner(
     draft_lines_json: str,
     budget: int,
     *,
+    context: str = "",
     max_line: int | None = None,
     top_p: float | None = None,
     user_system_prompt: str = "",
@@ -258,6 +259,7 @@ async def run_text_cleaner(
         query: 用户原始需求。
         draft_lines_json: [{"line": 1, "text": "..."}, ...] 的 JSON 字符串。
         budget: thinking token 预算。
+        context: 对话上下文（可选）。
         user_system_prompt: 用户 system prompt（可选）。
         provider: provider 标识符。
         json_via_prompt: 是否通过 prompt 额外约束 JSON 输出（兼容渠道）。
@@ -274,18 +276,24 @@ async def run_text_cleaner(
     sys_section = ""
     if user_system_prompt:
         sys_section = f"\n用户的重要指示：{user_system_prompt}\n"
+    context_section = f"对话上下文：\n{context}\n\n" if context else ""
 
     contents = (
+        f"{context_section}"
         f'{sys_section}用户原始需求："{query}"\n\n'
         f"正文按行切分（JSON）：\n{draft_lines_json}"
+    )
+    prefilled_contents = build_prefill_contents(
+        contents,
+        leading_instruction=REFINEMENT_CLEANER_PROMPT,
     )
 
     debug_info: dict[str, Any] = {}
     try:
         parsed = await generate_json(
             model=model,
-            contents=contents,
-            system_instruction=REFINEMENT_CLEANER_PROMPT,
+            contents=prefilled_contents,
+            system_instruction="",
             response_schema=REFINEMENT_CLEANER_SCHEMA,
             thinking_budget=budget,
             temperature=0.2,

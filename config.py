@@ -269,6 +269,28 @@ TEXT_CLEANER_DEBUG_MAX_CHARS: int = _load_non_negative_int(
     0,
 )
 
+# --- 精修初始专家请求调试 ---
+
+REFINEMENT_EXPERT_REQUEST_DEBUG_ENABLED: bool = os.getenv(
+    "REFINEMENT_EXPERT_REQUEST_DEBUG_ENABLED", "false"
+).lower() in ("true", "1", "yes")
+
+_refinement_expert_request_debug_dir_raw = os.getenv(
+    "REFINEMENT_EXPERT_REQUEST_DEBUG_DIR", "logs/refinement_expert_request_debug"
+)
+if os.path.isabs(_refinement_expert_request_debug_dir_raw):
+    REFINEMENT_EXPERT_REQUEST_DEBUG_DIR: str = _refinement_expert_request_debug_dir_raw
+else:
+    REFINEMENT_EXPERT_REQUEST_DEBUG_DIR = str(
+        (_BASE_DIR / _refinement_expert_request_debug_dir_raw).resolve()
+    )
+
+# 0 表示不截断，完整落盘
+REFINEMENT_EXPERT_REQUEST_DEBUG_MAX_CHARS: int = _load_non_negative_int(
+    "REFINEMENT_EXPERT_REQUEST_DEBUG_MAX_CHARS",
+    0,
+)
+
 # --- Checkpoint / Resume ---
 _checkpoint_dir_raw = os.getenv("CHECKPOINT_DIR", "checkpoints")
 if os.path.isabs(_checkpoint_dir_raw):
@@ -774,6 +796,24 @@ _VIRTUAL_MODEL_MAP: dict[str, VirtualModel] = {
     vm.id: vm for vm in VIRTUAL_MODELS
 }
 
+FORCED_MODEL_SUFFIX = "-forced"
+
+
+def split_forced_model_suffix(model_id: str) -> tuple[str, bool]:
+    """拆分模型名末尾的 forced 后缀。
+
+    Args:
+        model_id: 请求传入的模型名。
+
+    Returns:
+        (base_model_id, forced_enabled) 元组。
+    """
+    if model_id.endswith(FORCED_MODEL_SUFFIX):
+        base = model_id[: -len(FORCED_MODEL_SUFFIX)]
+        if base:
+            return base, True
+    return model_id, False
+
 
 # resolve_model 返回类型
 _ResolveResult = tuple[
@@ -804,7 +844,8 @@ def resolve_model(model_id: str) -> _ResolveResult:
          review_temperature, synthesis_temperature,
          mode, json_via_prompt) 元组.
     """
-    vm = _VIRTUAL_MODEL_MAP.get(model_id)
+    base_model_id, _ = split_forced_model_suffix(model_id)
+    vm = _VIRTUAL_MODEL_MAP.get(base_model_id)
     if vm:
         mgr_model = vm.manager_model or vm.real_model
         syn_model = vm.synthesis_model or vm.real_model
@@ -828,7 +869,7 @@ def resolve_model(model_id: str) -> _ResolveResult:
     # 未注册的模型名，直接透传，默认 high + .env 的 MAX_ROUNDS + 全局 provider + 无温度覆盖 + classic
     stage_providers = StageProviders.from_single(LLM_PROVIDER)
     return (
-        model_id, model_id, model_id,
+        base_model_id, base_model_id, base_model_id,
         "high", "high", "high",
         MAX_ROUNDS, LLM_PROVIDER,
         None, None, None, None,
@@ -868,7 +909,8 @@ def resolve_refinement_config(
     Returns:
         RefinementModelConfig 实例.
     """
-    vm = _VIRTUAL_MODEL_MAP.get(model_id)
+    base_model_id, _ = split_forced_model_suffix(model_id)
+    vm = _VIRTUAL_MODEL_MAP.get(base_model_id)
     default_small = "gemini-3-flash-preview"
 
     if vm:

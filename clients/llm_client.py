@@ -26,7 +26,7 @@ def _resolve_type(provider: str) -> str:
 async def generate_json(
     model: str,
     contents: str | list[Any],
-    system_instruction: str,
+    system_instruction: Optional[str],
     response_schema: dict[str, Any],
     thinking_budget: int,
     temperature: Optional[float] = None,

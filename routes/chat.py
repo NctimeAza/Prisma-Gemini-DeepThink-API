@@ -21,6 +21,7 @@ from config import (
     SSE_HEARTBEAT_INTERVAL,
     StageProviders,
     resolve_model,
+    split_forced_model_suffix,
 )
 from engine.checkpoint_store import CheckpointStore, CheckpointStoreError
 from engine.orchestrator import SYNTHESIS_FALLBACK_TEXT, run_deep_think
@@ -84,6 +85,7 @@ def _extract_system_prompt(request: ChatCompletionRequest) -> str:
 def _resolve_request(
     request: ChatCompletionRequest,
 ) -> tuple[str, str, str, DeepThinkConfig, str, "StageProviders"]:
+    base_model_id, forced_prefill_suffix = split_forced_model_suffix(request.model)
     (
         real_model, mgr_model, syn_model,
         p_level, e_level, s_level,
@@ -95,6 +97,7 @@ def _resolve_request(
     ) = resolve_model(request.model)
 
     if request.prisma_config:
+        request.prisma_config.forced_prefill_suffix = forced_prefill_suffix
         return (
             real_model,
             mgr_model,
@@ -109,7 +112,7 @@ def _resolve_request(
     if mode == "refinement":
         from config import resolve_refinement_config
         ref_cfg = resolve_refinement_config(
-            request.model, real_model, mgr_model, syn_model,
+            base_model_id, real_model, mgr_model, syn_model,
         )
         refinement_kwargs = {
             "refinement_max_rounds": ref_cfg.refinement_max_rounds,
@@ -135,6 +138,7 @@ def _resolve_request(
         review_temperature=review_temp,
         synthesis_temperature=synthesis_temp,
         json_via_prompt=json_via_prompt,
+        forced_prefill_suffix=forced_prefill_suffix,
         **refinement_kwargs,
     )
     return real_model, mgr_model, syn_model, config, provider, stage_providers
@@ -196,6 +200,31 @@ def _iter_chunks(text: str) -> list[str]:
 def _is_fallback_error_text(text: str) -> bool:
     stripped = (text or "").strip()
     return stripped == SYNTHESIS_FALLBACK_TEXT or stripped == REFINEMENT_FALLBACK_TEXT
+
+
+def _is_completed_with_empty_output(checkpoint: DeepThinkCheckpoint) -> bool:
+    """判断综合阶段是否出现“已完成但无正文输出”的异常检查点。"""
+    return (
+        checkpoint.status == "completed"
+        and checkpoint.phase == "synthesis"
+        and not (checkpoint.output_content or "").strip()
+    )
+
+
+def _repair_legacy_completed_checkpoint(checkpoint: DeepThinkCheckpoint) -> bool:
+    """修复旧版错误状态：避免 continue 被误判为仅回放。"""
+    is_legacy_fallback_case = (
+        checkpoint.status == "completed"
+        and checkpoint.phase == "synthesis"
+        and _is_fallback_error_text(checkpoint.output_content)
+    )
+    if not is_legacy_fallback_case and not _is_completed_with_empty_output(checkpoint):
+        return False
+
+    checkpoint.status = "error"
+    checkpoint.completed_at = None
+    checkpoint.output_content = ""
+    return True
 
 
 def _resume_hint(resume_id: str) -> str:
@@ -331,6 +360,11 @@ async def _generate_sse_stream(
                     synthesis_model=syn_model,
                     config=config,
                     temperature=request.temperature,
+                    top_p=(
+                        request.top_p
+                        if request.top_p is not None
+                        else config.top_p
+                    ),
                     system_prompt=system_prompt,
                     resume_checkpoint=checkpoint,
                     event_callback=_persist_event,
@@ -466,20 +500,14 @@ async def chat_completions(raw_request: Request):
         except CheckpointStoreError as exc:
             return _error_response(400, str(exc))
 
-        # Repair legacy checkpoints that were incorrectly marked completed
-        # after synthesis failures and only contain fallback error output.
-        if (
-            checkpoint.status == "completed"
-            and checkpoint.phase == "synthesis"
-            and _is_fallback_error_text(checkpoint.output_content)
-        ):
+        # 兼容旧检查点：
+        # 1) 综合失败却被写成 completed + fallback 文本
+        # 2) 综合阶段异常中断后被写成 completed 但 output_content 为空
+        if _repair_legacy_completed_checkpoint(checkpoint):
             logger.warning(
                 "[Checkpoint] repaired completed->error state for %s",
                 checkpoint.resume_id,
             )
-            checkpoint.status = "error"
-            checkpoint.completed_at = None
-            checkpoint.output_content = ""
 
         replay_only = checkpoint.status == "completed"
 
@@ -584,6 +612,11 @@ async def chat_completions(raw_request: Request):
                 synthesis_model=syn_model,
                 config=config,
                 temperature=request.temperature,
+                top_p=(
+                    request.top_p
+                    if request.top_p is not None
+                    else config.top_p
+                ),
                 system_prompt=system_prompt,
                 resume_checkpoint=checkpoint,
                 event_callback=_persist_event,

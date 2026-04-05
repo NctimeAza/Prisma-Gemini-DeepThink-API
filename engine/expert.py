@@ -22,6 +22,7 @@ async def run_expert(
     expert: ExpertResult,
     context: str,
     budget: int,
+    top_p: float | None = None,
     all_expert_roles: list[str] | None = None,
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
@@ -61,14 +62,16 @@ async def run_expert(
         try:
             # 构建包含 prefill 确认轮的多轮对话 contents
             contents = build_expert_contents(
-                expert.prompt, image_parts=image_parts,
+                expert.prompt,
+                image_parts=image_parts,
+                leading_instruction=system_instruction,
             )
 
             full_content, full_thoughts, _grounding = await generate_content(
                 model=model,
                 contents=contents,
-                system_instruction=system_instruction,
                 temperature=expert.temperature,
+                top_p=top_p,
                 thinking_budget=budget,
                 provider=provider,
             )

@@ -9,7 +9,7 @@ from typing import AsyncGenerator
 
 from clients.llm_client import generate_content_stream
 from models import ExpertResult, ReviewResult
-from prompts import get_synthesis_prompt
+from prompts import build_prefill_contents, get_synthesis_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ async def stream_synthesis(
     review_results: list[ReviewResult],
     budget: int,
     temperature: float | None = None,
+    top_p: float | None = None,
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
@@ -45,13 +46,15 @@ async def stream_synthesis(
         history_context, query, expert_results, review_results,
         user_system_prompt=user_system_prompt,
     )
+    contents = build_prefill_contents(prompt, image_parts=image_parts)
     logger.info("[Synthesis] Starting synthesis (%d experts)", len(expert_results))
 
     kwargs: dict = {
         "model": model,
-        "contents": prompt,
+        "contents": contents,
         "thinking_budget": budget,
-        "image_parts": image_parts,
+        "image_parts": None,
+        "top_p": top_p,
     }
     if temperature is not None:
         kwargs["temperature"] = temperature

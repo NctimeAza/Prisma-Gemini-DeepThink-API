@@ -39,6 +39,8 @@ from prompts import (
     SYNTHESIS_FALLBACK_TEXT,
     REFINEMENT_FALLBACK_TEXT,
     format_expert_task,
+    reset_forced_prefill_suffix_enabled,
+    set_forced_prefill_suffix_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,10 +179,16 @@ def _build_iteration_prompt(
     )
     task_part = base_prompt.strip() or "输出对目标专家回答的高质量改写和增强版本。"
     source_part = _truncate_for_iteration_context(previous_content or "（无输出）")
+    dimension_part = (
+        f"【上一轮可用维度】\n{target_expert.usage_dimension}\n\n"
+        if (target_expert.usage_dimension or "").strip()
+        else ""
+    )
 
     return (
         "你是被指派来进行“专家迭代改进”的新专家。\n"
         f"目标专家：{target_expert.role}（id={target_expert.id}）\n\n"
+        f"{dimension_part}"
         "【上一轮目标专家原回复】\n"
         f"{source_part}\n\n"
         "【审查模型严厉指令】\n"
@@ -311,6 +319,7 @@ async def _pipeline(
     syn_model: str,
     config: DeepThinkConfig,
     temperature: Optional[float],
+    top_p: float | None = None,
     system_prompt: str = "",
     image_parts: list[dict] | None = None,
     resume_checkpoint: DeepThinkCheckpoint | None = None,
@@ -340,6 +349,7 @@ async def _pipeline(
             syn_model=syn_model,
             config=config,
             temperature=temperature,
+            top_p=top_p,
             system_prompt=system_prompt,
             image_parts=image_parts,
             resume_checkpoint=resume_checkpoint,
@@ -401,6 +411,7 @@ async def _pipeline(
                 exp,
                 context,
                 budget,
+                top_p=top_p,
                 all_expert_roles=list(
                     dict.fromkeys(
                         e.role for e in all_experts
@@ -483,6 +494,7 @@ async def _pipeline(
                         if config.planning_temperature is not None
                         else temperature
                     ),
+                    top_p=top_p,
                     user_system_prompt=system_prompt,
                     image_parts=image_parts,
                     provider=manager_provider,
@@ -551,6 +563,7 @@ async def _pipeline(
                                 if config.review_temperature is not None
                                 else 0.7
                             ),
+                            top_p=top_p,
                             user_system_prompt=system_prompt,
                             image_parts=image_parts,
                             remaining_rounds=remaining_rounds,
@@ -660,6 +673,7 @@ async def _pipeline(
                     if config.synthesis_temperature is not None
                     else temperature
                 ),
+                top_p=top_p,
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
                 provider=synthesis_provider,
@@ -701,6 +715,7 @@ async def run_deep_think(
     synthesis_model: str | None = None,
     config: DeepThinkConfig | None = None,
     temperature: float | None = None,
+    top_p: float | None = None,
     system_prompt: str = "",
     image_parts: list[dict] | None = None,
     resume_checkpoint: DeepThinkCheckpoint | None = None,
@@ -723,6 +738,10 @@ async def run_deep_think(
     if not query.strip():
         return
 
+    prefill_suffix_token = set_forced_prefill_suffix_enabled(
+        config.forced_prefill_suffix
+    )
+
     if resume_checkpoint:
         resume_checkpoint.status = "running"
         resume_checkpoint.error_message = ""
@@ -743,6 +762,7 @@ async def run_deep_think(
             syn_model,
             config,
             temperature,
+            top_p,
             system_prompt,
             image_parts,
             resume_checkpoint,
@@ -823,11 +843,26 @@ async def run_deep_think(
     else:
         if resume_checkpoint:
             if resume_checkpoint.status == "running":
-                resume_checkpoint.status = "completed"
-                resume_checkpoint.phase = "synthesis"
-                resume_checkpoint.completed_at = _now_ts()
-                resume_checkpoint.updated_at = _now_ts()
-                await _emit_event(event_callback, "completed")
+                has_final_output = bool((resume_checkpoint.output_content or "").strip())
+                if has_final_output:
+                    resume_checkpoint.status = "completed"
+                    resume_checkpoint.phase = "synthesis"
+                    resume_checkpoint.completed_at = _now_ts()
+                    resume_checkpoint.updated_at = _now_ts()
+                    await _emit_event(event_callback, "completed")
+                else:
+                    # 综合阶段没有正文输出时，不能标记为 completed。
+                    resume_checkpoint.status = "error"
+                    resume_checkpoint.error_message = (
+                        "synthesis finished without output_content"
+                    )
+                    resume_checkpoint.completed_at = None
+                    resume_checkpoint.updated_at = _now_ts()
+                    await _emit_event(
+                        event_callback,
+                        "completed_without_output",
+                        {"phase": resume_checkpoint.phase},
+                    )
     finally:
         stop_event.set()
         heartbeat_task.cancel()
@@ -841,3 +876,4 @@ async def run_deep_think(
             await pipeline_task
         except asyncio.CancelledError:
             pass
+        reset_forced_prefill_suffix_enabled(prefill_suffix_token)

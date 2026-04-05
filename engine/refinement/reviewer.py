@@ -11,7 +11,7 @@ from typing import Any
 from clients.llm_client import generate_content
 from engine.refinement.json_repair import parse_json_with_repair
 from models import RefinementExpertConfig, RefinementReviewAnalysis
-from prompts import REFINEMENT_REVIEW_PROMPT
+from prompts import REFINEMENT_REVIEW_PROMPT, build_prefill_contents
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,9 @@ async def review_draft(
     budget: int,
     refinement_round: int = 1,
     previous_summary: str = "",
+    context: str = "",
     temperature: float | None = None,
+    top_p: float | None = None,
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
     provider: str = "",
@@ -52,6 +54,7 @@ async def review_draft(
         budget: thinking token 预算.
         refinement_round: 当前精修轮数.
         previous_summary: 上一轮综合助手的改动简评.
+        context: 对话上下文.
         temperature: 温度参数.
         user_system_prompt: 用户 system prompt.
         image_parts: 图片列表.
@@ -85,21 +88,25 @@ async def review_draft(
     sys_section = ""
     if user_system_prompt:
         sys_section = f"\n用户的重要指示：{user_system_prompt}\n"
+    context_section = f"对话上下文：\n{context}\n\n" if context else ""
 
     prompt = (
         f"{REFINEMENT_REVIEW_PROMPT.format(iteration_note=iteration_note)}\n\n"
+        f"{context_section}"
         f"{sys_section}"
         f'用户原始需求："{query}"\n\n'
         f"初稿按行切分内容：\n{lines_json}"
     )
+    contents = build_prefill_contents(prompt, image_parts=image_parts)
 
     try:
         raw_content, _, _ = await generate_content(
             model=model,
-            contents=prompt,
+            contents=contents,
             temperature=temperature or 0.7,
+            top_p=top_p,
             thinking_budget=budget,
-            image_parts=image_parts,
+            image_parts=None,
             provider=provider,
         )
 
@@ -117,6 +124,7 @@ async def review_draft(
             enable_repair=enable_json_repair,
             repair_model=json_repair_model,
             provider=provider,
+            top_p=top_p,
         )
 
         # 解析专家配置

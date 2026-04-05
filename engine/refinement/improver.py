@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 async def run_improver(
     model: str,
     expert_config: RefinementExpertConfig,
+    context: str,
     draft_lines_json: str,
     budget: int,
+    top_p: float | None = None,
     guidance: str = "",
     user_system_prompt: str = "",
     image_parts: list[dict] | None = None,
@@ -38,6 +40,7 @@ async def run_improver(
     Args:
         model: 改进专家模型.
         expert_config: 改进专家配置.
+        context: 对话上下文.
         draft_lines_json: 初稿按行切分的 JSON 字符串.
         budget: thinking token 预算.
         guidance: 审查模型给的额外指导.
@@ -53,6 +56,7 @@ async def run_improver(
     system_instruction = get_refinement_improver_system_instruction(
         role=expert_config.role,
         domain=expert_config.domain,
+        context=context,
         all_expert_roles=expert_config.all_expert_roles,
         guidance=guidance,
         user_system_prompt=user_system_prompt,
@@ -64,7 +68,9 @@ async def run_improver(
     )
 
     contents = build_refinement_expert_contents(
-        task_prompt, image_parts=image_parts,
+        task_prompt,
+        image_parts=image_parts,
+        leading_instruction=system_instruction,
     )
 
     max_retries = LLM_NETWORK_RETRIES
@@ -74,8 +80,8 @@ async def run_improver(
             full_content, _, _ = await generate_content(
                 model=model,
                 contents=contents,
-                system_instruction=system_instruction,
                 temperature=expert_config.temperature,
+                top_p=top_p,
                 thinking_budget=budget,
                 provider=provider,
             )
@@ -108,6 +114,7 @@ async def run_improver(
                 enable_repair=enable_json_repair,
                 repair_model=json_repair_model,
                 provider=provider,
+                top_p=top_p,
             )
 
             operations = []

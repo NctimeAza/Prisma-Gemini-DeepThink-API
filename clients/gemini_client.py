@@ -14,6 +14,7 @@ from google import genai
 from google.genai import types
 
 from config import (
+    DEFAULT_TOP_P,
     LLM_PROVIDER,
     LLM_REQUEST_DELAY_MIN,
     LLM_REQUEST_DELAY_MAX,
@@ -97,11 +98,13 @@ async def _random_delay() -> None:
 async def generate_json(
     model: str,
     contents: str | list[Any],
-    system_instruction: str,
+    system_instruction: Optional[str],
     response_schema: dict[str, Any],
     thinking_budget: int,
     temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
     image_parts: list[dict] | None = None,
+    debug_info: dict[str, Any] | None = None,
     *,
     provider: str = "",
     json_via_prompt: bool = False,
@@ -128,13 +131,15 @@ async def generate_json(
         contents = _build_contents(contents, image_parts)
 
     config_dict: dict[str, Any] = {
-        "system_instruction": system_instruction,
         "response_mime_type": "application/json",
         "response_schema": response_schema,
         "tools": [types.Tool(google_search=types.GoogleSearch())],
     }
+    if system_instruction:
+        config_dict["system_instruction"] = system_instruction
     if temperature is not None:
         config_dict["temperature"] = temperature
+    config_dict["top_p"] = DEFAULT_TOP_P if top_p is None else top_p
     if thinking_budget > 0:
         config_dict["thinking_config"] = types.ThinkingConfig(
             thinking_budget=thinking_budget,
@@ -164,6 +169,12 @@ async def generate_json(
     cleaned = _clean_json_string(raw_text)
     if cleaned != raw_text:
         logger.debug("[Gemini] cleaned JSON:\n%s", cleaned)
+    if debug_info is not None:
+        debug_info["client"] = "gemini"
+        debug_info["model"] = model
+        debug_info["provider"] = provider or LLM_PROVIDER
+        debug_info["raw_text"] = raw_text or ""
+        debug_info["cleaned_text"] = cleaned or ""
     return json.loads(cleaned)
 
 
@@ -172,6 +183,7 @@ async def generate_content(
     contents: str | list[Any],
     system_instruction: Optional[str] = None,
     temperature: float = 1.0,
+    top_p: Optional[float] = None,
     thinking_budget: int = 0,
     image_parts: list[dict] | None = None,
     *,
@@ -203,6 +215,7 @@ async def generate_content(
 
     config_dict: dict[str, Any] = {
         "temperature": temperature,
+        "top_p": DEFAULT_TOP_P if top_p is None else top_p,
         "tools": [types.Tool(google_search=types.GoogleSearch())],
     }
     if system_instruction:
@@ -279,6 +292,7 @@ async def generate_content_stream(
     contents: str | list[Any],
     system_instruction: Optional[str] = None,
     temperature: float = 1.0,
+    top_p: Optional[float] = None,
     thinking_budget: int = 0,
     image_parts: list[dict] | None = None,
     *,
@@ -307,6 +321,7 @@ async def generate_content_stream(
 
     config_dict: dict[str, Any] = {
         "temperature": temperature,
+        "top_p": DEFAULT_TOP_P if top_p is None else top_p,
         "tools": [types.Tool(google_search=types.GoogleSearch())],
     }
     if system_instruction:

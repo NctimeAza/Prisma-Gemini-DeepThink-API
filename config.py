@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+from models import ExpertModelProfile
 
 load_dotenv()
 
@@ -24,7 +25,7 @@ _BASE_DIR = Path(__file__).parent
 
 # --- 环境变量 ---
 
-_SUPPORTED_LLM_PROVIDERS = {"gemini", "openai"}
+_SUPPORTED_LLM_PROVIDERS = {"gemini", "openai", "openai_responses"}
 _LLM_PROVIDER_RAW = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
 if _LLM_PROVIDER_RAW in _SUPPORTED_LLM_PROVIDERS:
     LLM_PROVIDER: str = _LLM_PROVIDER_RAW
@@ -39,6 +40,14 @@ GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 GEMINI_BASE_URL: Optional[str] = os.getenv("GEMINI_BASE_URL") or None
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL") or None
+OPENAI_RESPONSES_API_KEY: str = os.getenv(
+    "OPENAI_RESPONSES_API_KEY", OPENAI_API_KEY
+)
+OPENAI_RESPONSES_BASE_URL: Optional[str] = (
+    os.getenv("OPENAI_RESPONSES_BASE_URL")
+    or OPENAI_BASE_URL
+    or None
+)
 
 
 # --- Provider 配置注册表 ---
@@ -49,7 +58,7 @@ class ProviderConfig:
     """单个 LLM Provider 的连接配置."""
 
     name: str          # provider 标识符，如 "gemini", "openai", "deepseek"
-    type: str          # 底层 API 类型: "gemini" 或 "openai"
+    type: str          # 底层 API 类型: "gemini" / "openai" / "openai_responses"
     api_key: str = ""
     base_url: Optional[str] = None
 
@@ -85,6 +94,12 @@ def _load_provider_configs() -> dict[str, ProviderConfig]:
             type="openai",
             api_key=OPENAI_API_KEY,
             base_url=OPENAI_BASE_URL,
+        ),
+        "openai_responses": ProviderConfig(
+            name="openai_responses",
+            type="openai_responses",
+            api_key=OPENAI_RESPONSES_API_KEY,
+            base_url=OPENAI_RESPONSES_BASE_URL,
         ),
     }
 
@@ -209,6 +224,22 @@ SSE_HEARTBEAT_INTERVAL: int = int(os.getenv("SSE_HEARTBEAT_INTERVAL", "15"))
 # 流式响应中等待单个 chunk 的超时（秒），超过则认为上游已断开
 # 设为 0 表示不限制
 STREAM_CHUNK_TIMEOUT: float = float(os.getenv("STREAM_CHUNK_TIMEOUT", "300"))
+
+# OpenAI Responses 非流式调用是否内部改走流式聚合。
+# 某些中转在 Responses 非流式模式下会空返回，开启后可绕过此问题。
+OPENAI_RESPONSES_USE_STREAM_FOR_NON_STREAM: bool = os.getenv(
+    "OPENAI_RESPONSES_USE_STREAM_FOR_NON_STREAM", "true"
+).lower() in ("true", "1", "yes")
+
+REFINEMENT_NO_CLICHES_ENABLED: bool = os.getenv(
+    "REFINEMENT_NO_CLICHES_ENABLED", "false"
+).lower() in ("true", "1", "yes")
+REFINEMENT_NO_CLICHES_MODEL: str = os.getenv(
+    "REFINEMENT_NO_CLICHES_MODEL", "gemini-3.1-pro-preview"
+).strip() or "gemini-3.1-pro-preview"
+REFINEMENT_NO_CLICHES_PROVIDER: str = os.getenv(
+    "REFINEMENT_NO_CLICHES_PROVIDER", "gemini"
+).strip().lower() or "gemini"
 
 
 def _load_non_negative_int(name: str, default: int) -> int:
@@ -351,6 +382,15 @@ class StageProviders:
 
 
 @dataclass
+class ExpertRoutingConfig:
+    """专家执行底模分配配置."""
+
+    expert_model_pool: list[ExpertModelProfile] = field(default_factory=list)
+    enable_manager_expert_model_selection: bool = False
+    enable_review_expert_model_selection: bool = False
+
+
+@dataclass
 class VirtualModel:
     """虚拟模型定义：对外暴露的模型名 -> 实际模型 + 思考预算.
 
@@ -381,16 +421,36 @@ class VirtualModel:
     # 开启后，会在结构化 JSON 请求里额外通过 prompt 强制约束输出格式
     # 用于兼容不稳定或不支持 response_format 的 OpenAI 兼容渠道
     json_via_prompt: bool = False
+    # --- 专家执行底模分配 ---
+    expert_model_pool: list[ExpertModelProfile] = field(default_factory=list)
+    enable_manager_expert_model_selection: bool = False
+    enable_review_expert_model_selection: bool = False
     # --- 精修流程专用字段 ---
     mode: str = "classic"  # "classic" 或 "refinement"
+    refinement_planner_model: Optional[str] = None  # 精修规划模型
+    refinement_planner_provider: Optional[str] = None  # 精修规划 provider
+    pre_draft_expert_model: Optional[str] = None  # 初稿前专家模型
+    pre_draft_expert_provider: Optional[str] = None  # 初稿前专家 provider
+    pre_draft_review_model: Optional[str] = None  # 初稿前审查模型
+    pre_draft_review_provider: Optional[str] = None  # 初稿前审查 provider
     draft_model: Optional[str] = None  # 初稿生成模型
+    draft_provider: Optional[str] = None  # 初稿生成 provider
     review_model: Optional[str] = None  # 审查阶段模型
+    review_provider: Optional[str] = None  # 审查阶段 provider
+    improver_model: Optional[str] = None  # 改进专家模型
+    improver_provider: Optional[str] = None  # 改进专家 provider
     merge_model: Optional[str] = None  # 综合助手模型
+    merge_provider: Optional[str] = None  # 综合助手 provider
+    text_cleaner_model: Optional[str] = None  # 文本清洗模型
+    text_cleaner_provider: Optional[str] = None  # 文本清洗 provider
     json_repair_model: Optional[str] = None  # JSON 修复模型
     refinement_max_rounds: int = 2  # 精修最大迭代轮数
     pre_draft_review_rounds: int = 1  # pre-draft review rounds (0=disabled)
     enable_json_repair: bool = False  # 是否启用 JSON 修复
     enable_text_cleaner: bool = True  # 是否启用末端文本清洗专家（默认启用）
+    enable_no_cliches: Optional[bool] = None  # 是否启用强力杀八股
+    no_cliches_model: Optional[str] = None  # 杀八股模型
+    no_cliches_provider: Optional[str] = None  # 杀八股 provider
 
 
 # 注册所有虚拟模型（这里不包括env的）
@@ -440,24 +500,99 @@ VIRTUAL_MODELS: list[VirtualModel] = [
 
     # --- Gemini 3.1 ---
     VirtualModel(
-        id="gemini-3.1-pro-deepthink-minimal",
-        real_model="gemini-3.1-pro-preview",
+        id="gpt-5.4-deepthink-minimal",
+        real_model="gpt-5.4",
         manager_model="gemini-3.1-pro-preview",
-        synthesis_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview", # 没事不用改了，就用它总结
         planning_level="medium",
         expert_level="low",
+        synthesis_level="medium",
+        max_rounds=1,
+        provider="gemini",
+        manager_provider="gemini",
+        expert_provider="openai_responses",
+        synthesis_provider="gemini",
+        desc="GPT-5.4 联网搜索最小混合版。Manager/Review/Synthesis 走 Gemini，Expert 走 Responses。",
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-minimal",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gpt-5.4-xhigh",
+        manager_provider="openai_responses",
+        synthesis_model="gemini-3.1-pro-preview",
+        planning_level="high",
+        expert_level="high",
         synthesis_level="high",
+        expert_model_pool=[
+            ExpertModelProfile(
+                id="gpt-5.4-high",
+                model="gpt-5.4-high",
+                provider="openai_responses",
+                description=(
+                    "逻辑强、创意一般、擅长抓bug、非创意类规划、代码审查、找逻辑漏洞（各种领域）、在线搜索。"
+                    "前端审美和长文表达很一般。"
+                ),
+            ),
+            ExpertModelProfile(
+                id="gemini-3.1-pro-preview",
+                model="gemini-3.1-pro-preview",
+                provider="gemini",
+                description=(
+                    "参数量、知识量非常高创意强、头脑风暴强、前端审美、文字表达、整体呈现很强。可搜索但很难给出精确出处"
+                    "小毛病偏多，代码稳定性略弱。"
+                ),
+            ),
+        ],
+        enable_manager_expert_model_selection=True,
+        enable_review_expert_model_selection=True,
         max_rounds=1,
         desc="3.1 Pro + Low thinking budget. 单轮直出，不审查。",
     ),
     VirtualModel(
-        id="gemini-3.1-pro-deepthink-low",
+        id="gemini-3.1-pro-deepthink-low-no-cliches",
         real_model="gemini-3.1-pro-preview",
         manager_model="gemini-3.1-pro-preview",
         synthesis_model="gemini-3.1-pro-preview",
         planning_level="medium",
         expert_level="medium",
         synthesis_level="high",
+        max_rounds=2,
+        enable_no_cliches=True,
+        no_cliches_model="gemini-3.1-pro-preview",
+        no_cliches_provider="gemini",
+        desc="3.1 Pro + Low thinking budget. 1轮审查+去八股",
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-low",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gpt-5.4-xhigh",
+        manager_provider="openai_responses",
+        synthesis_model="gemini-3.1-pro-preview",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        expert_model_pool=[
+            ExpertModelProfile(
+                id="gpt-5.4-high",
+                model="gpt-5.4-high",
+                provider="openai_responses",
+                description=(
+                    "逻辑强、创意一般、擅长抓bug、非创意类规划、代码审查、找逻辑漏洞（各种领域）、在线搜索。"
+                    "前端审美和长文表达很一般。"
+                ),
+            ),
+            ExpertModelProfile(
+                id="gemini-3.1-pro-preview",
+                model="gemini-3.1-pro-preview",
+                provider="gemini",
+                description=(
+                    "参数量、知识量非常高创意强、头脑风暴强、前端审美、文字表达、整体呈现很强。可搜索但很难给出精确出处"
+                    "小毛病偏多，代码稳定性略弱。"
+                ),
+            ),
+        ],
+        enable_manager_expert_model_selection=True,
+        enable_review_expert_model_selection=True,
         max_rounds=2,
         desc="3.1 Pro + Low thinking budget. 1轮审查，合适日常任务用",
     ),
@@ -491,26 +626,9 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         planning_level="high",
         expert_level="high",
         synthesis_level="high",
-        max_rounds=10,
-        desc="3.1 Pro + High budget + 最多10轮极限审查。慎用，耗时可能很长。",
+        max_rounds=12,
+        desc="3.1 Pro + High budget + 最多12轮极限审查。慎用，耗时可能很长。",
     ),
-    # 精修测试用
-    # {
-    #     "id": "gemini-3.1-pro-refinement-medium",
-    #     "real_model": "gemini-3.1-pro-preview",
-    #     "manager_model": "gemini-3.1-pro-preview",
-    #     "synthesis_model": "gemini-3.1-pro-preview",
-    #     "json_repair_model": "gemini-3-flash-preview",
-    #     "mode": "refinement",
-    #     "planning_level": "high",
-    #     "expert_level": "high",
-    #     "synthesis_level": "high",
-    #     "refinement_max_rounds": 2,
-    #     "pre_draft_review_rounds": 1,
-    #     "enable_json_repair": false,
-    #     "max_rounds": 1,
-    #     "desc": "3.1 Pro 精修流程实验模式，侧重写作精修改进"
-    # }
     VirtualModel(
         id="gemini-3.1-pro-deepthink-refinement-low",
         real_model="gemini-3.1-pro-preview",
@@ -562,6 +680,106 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         max_rounds=1,
         desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
     ),
+    # gpt文本能力不行，但纠错能力极强，故仅用于审查和分配专家
+    VirtualModel(
+        id="gemini-gpt-deepthink-refinement-high",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gpt-5.4-high",
+        synthesis_model="gemini-3.1-pro-preview",
+        mode="refinement",
+        refinement_planner_model="gpt-5.4-high",
+        refinement_planner_provider="openai_responses",
+        pre_draft_expert_model="gemini-3.1-pro-preview",
+        pre_draft_expert_provider="gemini",
+        pre_draft_review_model="gpt-5.4-high",
+        pre_draft_review_provider="openai_responses",
+        draft_model="claude-opus-4-6-thinking",
+        draft_provider="gemini",
+        review_model="gpt-5.4-high",
+        review_provider="openai_responses",
+        improver_model="gemini-3.1-pro-preview",
+        improver_provider="gemini",
+        merge_model="gemini-3.1-pro-preview",
+        merge_provider="gemini",
+        text_cleaner_model="gemini-3.1-pro-preview",
+        text_cleaner_provider="gemini",
+        json_repair_model="gemini-3-flash-preview",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        expert_temperature=2.0,
+        refinement_max_rounds=2,
+        pre_draft_review_rounds=4,
+        enable_json_repair=False,
+        max_rounds=1,
+        provider="gemini",
+        manager_provider="openai_responses",
+        expert_provider="gemini",
+        synthesis_provider="gemini",
+        enable_no_cliches=True,
+        no_cliches_model="gemini-2.5-pro",
+        no_cliches_provider="gemini",
+        desc="混合精修高档：规划/预审/初稿审查走 GPT-5.4，初稿前专家、改进与清洗走 Gemini，初稿写作走 Claude。",
+    ),
+    VirtualModel(
+        id="gemini-gpt-deepthink-refinement-code-xhigh",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gpt-5.4-high",
+        synthesis_model="gemini-3.1-pro-preview",
+        mode="refinement",
+        refinement_planner_model="gpt-5.4-high",
+        refinement_planner_provider="openai_responses",
+        pre_draft_expert_model="gemini-3.1-pro-preview",
+        pre_draft_expert_provider="gemini",
+        pre_draft_review_model="gpt-5.4-high",
+        pre_draft_review_provider="openai_responses",
+        draft_model="gemini-3.1-pro-preview",
+        draft_provider="gemini",
+        review_model="gpt-5.4-high",
+        review_provider="openai_responses",
+        improver_model="gemini-3.1-pro-preview",
+        improver_provider="gemini",
+        merge_model="gemini-3.1-pro-preview",
+        merge_provider="gemini",
+        text_cleaner_model="gemini-3.1-pro-preview",
+        text_cleaner_provider="gemini",
+        json_repair_model="gemini-3-flash-preview",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        expert_temperature=1.0,
+        refinement_max_rounds=5,
+        pre_draft_review_rounds=3,
+        enable_json_repair=False,
+        max_rounds=1,
+        provider="gemini",
+        manager_provider="openai_responses",
+        expert_provider="gemini",
+        synthesis_provider="gemini",
+        expert_model_pool=[
+            ExpertModelProfile(
+                id="gpt-5.4-high",
+                model="gpt-5.4-high",
+                provider="openai_responses",
+                description=(
+                    "创意一般、擅长抓bug、非创意类规划、代码审查、找逻辑漏洞（各种领域）、在线搜索。"
+                    "前端审美和长文表达很一般。"
+                ),
+            ),
+            ExpertModelProfile(
+                id="gemini-3.1-pro-preview",
+                model="gemini-3.1-pro-preview",
+                provider="gemini",
+                description=(
+                    "创意强、头脑风暴强、前端审美、文字表达、整体呈现很强。"
+                    "但小毛病偏多，代码稳定性略弱。"
+                ),
+            ),
+        ],
+        enable_manager_expert_model_selection=True,
+        enable_review_expert_model_selection=True,
+        desc="混合精修高档，代码专精：规划/预审/初稿审查走 GPT-5.4，初稿前专家、改进与清洗走 Gemini",
+    ),
     VirtualModel(
         id="gemini-3.1-pro-deepthink-refinement-extra",
         real_model="gemini-3.1-pro-preview",
@@ -601,6 +819,71 @@ VIRTUAL_MODELS: list[VirtualModel] = [
 
 
 # --- 加载用户自定义虚拟模型 ---
+
+
+def _parse_expert_model_pool(
+    raw_pool: object,
+) -> list[ExpertModelProfile]:
+    """解析 expert_model_pool 字段."""
+    if raw_pool is None:
+        return []
+
+    pool_items: list[object]
+    if isinstance(raw_pool, dict):
+        pool_items = []
+        for item_id, item_value in raw_pool.items():
+            if isinstance(item_value, dict):
+                merged = dict(item_value)
+                merged.setdefault("id", str(item_id))
+                merged.setdefault("model", str(item_id))
+                pool_items.append(merged)
+            else:
+                pool_items.append({
+                    "id": str(item_id),
+                    "model": str(item_id),
+                    "description": str(item_value),
+                })
+    elif isinstance(raw_pool, list):
+        pool_items = raw_pool
+    else:
+        raise ValueError("expert_model_pool must be an array or object")
+
+    parsed: list[ExpertModelProfile] = []
+    for idx, item in enumerate(pool_items, start=1):
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                raise ValueError(f"expert_model_pool item #{idx} is empty")
+            parsed.append(ExpertModelProfile(id=text, model=text))
+            continue
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"expert_model_pool item #{idx} must be an object or string"
+            )
+
+        item_id = str(item.get("id") or item.get("model") or "").strip()
+        model_name = str(
+            item.get("model") or item.get("real_model") or item_id
+        ).strip()
+        if not item_id:
+            raise ValueError(f"expert_model_pool item #{idx} missing id/model")
+        if not model_name:
+            raise ValueError(f"expert_model_pool item #{idx} missing model")
+
+        parsed.append(
+            ExpertModelProfile(
+                id=item_id,
+                model=model_name,
+                provider=str(item.get("provider") or "").strip().lower(),
+                description=str(
+                    item.get("description")
+                    or item.get("desc")
+                    or item.get("summary")
+                    or ""
+                ).strip(),
+            )
+        )
+    return parsed
 
 def _load_extra_virtual_models() -> list[VirtualModel]:
     """从 .env 配置加载用户自定义的虚拟模型.
@@ -711,15 +994,42 @@ def _load_extra_virtual_models() -> list[VirtualModel]:
                 review_temperature=item.get("review_temperature"),
                 synthesis_temperature=item.get("synthesis_temperature"),
                 json_via_prompt=item.get("json_via_prompt", False),
+                expert_model_pool=_parse_expert_model_pool(
+                    item.get("expert_model_pool", item.get("expert_models"))
+                ),
+                enable_manager_expert_model_selection=item.get(
+                    "enable_manager_expert_model_selection",
+                    False,
+                ),
+                enable_review_expert_model_selection=item.get(
+                    "enable_review_expert_model_selection",
+                    False,
+                ),
                 mode=item.get("mode", "classic"),
+                refinement_planner_model=item.get("refinement_planner_model"),
+                refinement_planner_provider=item.get("refinement_planner_provider"),
+                pre_draft_expert_model=item.get("pre_draft_expert_model"),
+                pre_draft_expert_provider=item.get("pre_draft_expert_provider"),
+                pre_draft_review_model=item.get("pre_draft_review_model"),
+                pre_draft_review_provider=item.get("pre_draft_review_provider"),
                 draft_model=item.get("draft_model"),
+                draft_provider=item.get("draft_provider"),
                 review_model=item.get("review_model"),
+                review_provider=item.get("review_provider"),
+                improver_model=item.get("improver_model"),
+                improver_provider=item.get("improver_provider"),
                 merge_model=item.get("merge_model"),
+                merge_provider=item.get("merge_provider"),
+                text_cleaner_model=item.get("text_cleaner_model"),
+                text_cleaner_provider=item.get("text_cleaner_provider"),
                 json_repair_model=item.get("json_repair_model"),
                 refinement_max_rounds=item.get("refinement_max_rounds", 2),
                 pre_draft_review_rounds=item.get("pre_draft_review_rounds", 1),
                 enable_json_repair=item.get("enable_json_repair", False),
                 enable_text_cleaner=item.get("enable_text_cleaner", True),
+                enable_no_cliches=item.get("enable_no_cliches"),
+                no_cliches_model=item.get("no_cliches_model"),
+                no_cliches_provider=item.get("no_cliches_provider"),
             )
             models.append(vm)
             logger.info(
@@ -798,6 +1108,27 @@ def split_forced_model_suffix(model_id: str) -> tuple[str, bool]:
     return model_id, False
 
 
+def split_provider_model_prefix(model_id: str) -> tuple[str, str] | None:
+    """拆分 provider/model 直通语法。
+
+    Args:
+        model_id: 请求传入的模型名。
+
+    Returns:
+        命中时返回 (provider, real_model)，否则返回 None。
+    """
+    provider, sep, real_model = model_id.partition("/")
+    if not sep:
+        return None
+    provider = provider.strip().lower()
+    real_model = real_model.strip()
+    if not provider or not real_model:
+        return None
+    if provider not in PROVIDER_CONFIGS:
+        return None
+    return provider, real_model
+
+
 # resolve_model 返回类型
 _ResolveResult = tuple[
     str, str, str,               # real_model, manager_model, synthesis_model
@@ -849,6 +1180,20 @@ def resolve_model(model_id: str) -> _ResolveResult:
             stage_providers,
         )
 
+    direct_provider = split_provider_model_prefix(base_model_id)
+    if direct_provider:
+        provider, real_model = direct_provider
+        stage_providers = StageProviders.from_single(provider)
+        return (
+            real_model, real_model, real_model,
+            "high", "high", "high",
+            MAX_ROUNDS, provider,
+            None, None, None, None,
+            "classic",
+            False,
+            stage_providers,
+        )
+
     # 未注册的模型名，直接透传，默认 high + .env 的 MAX_ROUNDS + 全局 provider + 无温度覆盖 + classic
     stage_providers = StageProviders.from_single(LLM_PROVIDER)
     return (
@@ -865,14 +1210,123 @@ def resolve_model(model_id: str) -> _ResolveResult:
 @dataclass
 class RefinementModelConfig:
     """精修流程各阶段模型配置."""
+    refinement_planner_model: str  # 精修规划模型
+    refinement_planner_provider: str  # 精修规划 provider
+    pre_draft_expert_model: str  # 初稿前专家模型
+    pre_draft_expert_provider: str  # 初稿前专家 provider
+    pre_draft_review_model: str  # 初稿前审查模型
+    pre_draft_review_provider: str  # 初稿前审查 provider
     draft_model: str       # 初稿生成模型
+    draft_provider: str  # 初稿生成 provider
     review_model: str      # 审查模型
+    review_provider: str  # 审查 provider
+    improver_model: str  # 改进专家模型
+    improver_provider: str  # 改进专家 provider
     merge_model: str       # 综合助手模型
+    merge_provider: str  # 综合助手 provider
+    text_cleaner_model: str  # 文本清洗模型
+    text_cleaner_provider: str  # 文本清洗 provider
     json_repair_model: str  # JSON 修复模型
     refinement_max_rounds: int = 2
     pre_draft_review_rounds: int = 1  # pre-draft review rounds (0=disabled)
     enable_json_repair: bool = False
     enable_text_cleaner: bool = True
+    enable_no_cliches: bool = False
+    no_cliches_model: str = REFINEMENT_NO_CLICHES_MODEL
+    no_cliches_provider: str = REFINEMENT_NO_CLICHES_PROVIDER
+
+
+@dataclass
+class NoClichesConfig:
+    """强力杀八股配置。"""
+
+    enable_no_cliches: bool
+    no_cliches_model: str
+    no_cliches_provider: str
+
+
+def resolve_no_cliches_config(
+    model_id: str,
+    real_model: str,
+    stage_providers: StageProviders | None = None,
+) -> NoClichesConfig:
+    """解析强力杀八股配置。"""
+    del real_model
+    del stage_providers
+    base_model_id, _ = split_forced_model_suffix(model_id)
+    vm = _VIRTUAL_MODEL_MAP.get(base_model_id)
+
+    if vm:
+        return NoClichesConfig(
+            enable_no_cliches=(
+                vm.enable_no_cliches
+                if vm.enable_no_cliches is not None
+                else REFINEMENT_NO_CLICHES_ENABLED
+            ),
+            no_cliches_model=vm.no_cliches_model or REFINEMENT_NO_CLICHES_MODEL,
+            no_cliches_provider=(
+                vm.no_cliches_provider or REFINEMENT_NO_CLICHES_PROVIDER
+            ),
+        )
+
+    return NoClichesConfig(
+        enable_no_cliches=REFINEMENT_NO_CLICHES_ENABLED,
+        no_cliches_model=REFINEMENT_NO_CLICHES_MODEL,
+        no_cliches_provider=REFINEMENT_NO_CLICHES_PROVIDER,
+    )
+
+
+def resolve_expert_routing_config(
+    model_id: str,
+) -> ExpertRoutingConfig:
+    """解析虚拟模型的专家执行底模分配配置。"""
+    base_model_id, _ = split_forced_model_suffix(model_id)
+    vm = _VIRTUAL_MODEL_MAP.get(base_model_id)
+    if not vm:
+        return ExpertRoutingConfig()
+
+    return ExpertRoutingConfig(
+        expert_model_pool=list(vm.expert_model_pool),
+        enable_manager_expert_model_selection=(
+            vm.enable_manager_expert_model_selection
+        ),
+        enable_review_expert_model_selection=(
+            vm.enable_review_expert_model_selection
+        ),
+    )
+
+
+def resolve_expert_model_selection(
+    expert_model: str,
+    default_model: str,
+    default_provider: str,
+    expert_model_pool: list[ExpertModelProfile] | None = None,
+) -> tuple[str, str, str]:
+    """将 expert_model 解析为实际执行的 model/provider。"""
+    selected = (expert_model or "").strip()
+    if not selected:
+        return "", default_model, default_provider
+
+    for profile in expert_model_pool or []:
+        if selected == profile.id or selected == profile.model:
+            return (
+                profile.id,
+                profile.model,
+                profile.provider or default_provider,
+            )
+
+    direct_provider = split_provider_model_prefix(selected)
+    if direct_provider:
+        provider, real_model = direct_provider
+        return selected, real_model, provider
+
+    logger.warning(
+        "[Config] Unknown expert_model=%r, fallback to default %s@%s",
+        selected,
+        default_model,
+        default_provider,
+    )
+    return selected, default_model, default_provider
 
 
 def resolve_refinement_config(
@@ -880,6 +1334,7 @@ def resolve_refinement_config(
     real_model: str,
     mgr_model: str,
     syn_model: str,
+    stage_providers: StageProviders | None = None,
 ) -> RefinementModelConfig:
     """解析虚拟模型精修流程配置.
 
@@ -888,6 +1343,7 @@ def resolve_refinement_config(
         real_model: 已解析的 Expert 模型.
         mgr_model: 已解析的 Manager 模型.
         syn_model: 已解析的 Synthesis 模型.
+        stage_providers: 已解析的阶段 provider.
 
     Returns:
         RefinementModelConfig 实例.
@@ -895,24 +1351,73 @@ def resolve_refinement_config(
     base_model_id, _ = split_forced_model_suffix(model_id)
     vm = _VIRTUAL_MODEL_MAP.get(base_model_id)
     default_small = "gemini-3-flash-preview"
+    stage_providers = stage_providers or StageProviders.from_single(LLM_PROVIDER)
 
     if vm:
         return RefinementModelConfig(
+            refinement_planner_model=vm.refinement_planner_model or mgr_model,
+            refinement_planner_provider=(
+                vm.refinement_planner_provider or stage_providers.manager
+            ),
+            pre_draft_expert_model=vm.pre_draft_expert_model or real_model,
+            pre_draft_expert_provider=(
+                vm.pre_draft_expert_provider or stage_providers.expert
+            ),
+            pre_draft_review_model=vm.pre_draft_review_model or mgr_model,
+            pre_draft_review_provider=(
+                vm.pre_draft_review_provider or stage_providers.manager
+            ),
             draft_model=vm.draft_model or real_model,
+            draft_provider=vm.draft_provider or stage_providers.expert,
             review_model=vm.review_model or mgr_model,
+            review_provider=vm.review_provider or stage_providers.manager,
+            improver_model=vm.improver_model or real_model,
+            improver_provider=vm.improver_provider or stage_providers.expert,
             merge_model=vm.merge_model or syn_model,
+            merge_provider=vm.merge_provider or stage_providers.synthesis,
+            text_cleaner_model=vm.text_cleaner_model or (vm.merge_model or syn_model),
+            text_cleaner_provider=(
+                vm.text_cleaner_provider
+                or vm.merge_provider
+                or stage_providers.synthesis
+            ),
             json_repair_model=vm.json_repair_model or default_small,
             refinement_max_rounds=vm.refinement_max_rounds,
             pre_draft_review_rounds=vm.pre_draft_review_rounds,
             enable_json_repair=vm.enable_json_repair,
             enable_text_cleaner=vm.enable_text_cleaner,
+            enable_no_cliches=(
+                vm.enable_no_cliches
+                if vm.enable_no_cliches is not None
+                else REFINEMENT_NO_CLICHES_ENABLED
+            ),
+            no_cliches_model=vm.no_cliches_model or REFINEMENT_NO_CLICHES_MODEL,
+            no_cliches_provider=(
+                vm.no_cliches_provider or REFINEMENT_NO_CLICHES_PROVIDER
+            ),
         )
 
     return RefinementModelConfig(
+        refinement_planner_model=mgr_model,
+        refinement_planner_provider=stage_providers.manager,
+        pre_draft_expert_model=real_model,
+        pre_draft_expert_provider=stage_providers.expert,
+        pre_draft_review_model=mgr_model,
+        pre_draft_review_provider=stage_providers.manager,
         draft_model=real_model,
+        draft_provider=stage_providers.expert,
         review_model=mgr_model,
+        review_provider=stage_providers.manager,
+        improver_model=real_model,
+        improver_provider=stage_providers.expert,
         merge_model=syn_model,
+        merge_provider=stage_providers.synthesis,
+        text_cleaner_model=syn_model,
+        text_cleaner_provider=stage_providers.synthesis,
         json_repair_model=default_small,
+        enable_no_cliches=REFINEMENT_NO_CLICHES_ENABLED,
+        no_cliches_model=REFINEMENT_NO_CLICHES_MODEL,
+        no_cliches_provider=REFINEMENT_NO_CLICHES_PROVIDER,
     )
 
 

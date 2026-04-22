@@ -19,25 +19,27 @@ flowchart LR
     A10 --> A11["A11 Provider 无关调度<br/>clients.llm_client"]
     A11 --> A12{"A12 provider 类型"}
     A12 -->|gemini| A13["A13 Gemini client"]
-    A12 -->|openai| A14["A14 OpenAI client"]
-    A13 --> A15["A15 输出组装<br/>SSE 或 JSON"]
-    A14 --> A15
-    A15 --> A16["A16 返回下游用户"]
+    A12 -->|openai| A14["A14 OpenAI chat client"]
+    A12 -->|openai_responses| A15["A15 OpenAI Responses client"]
+    A13 --> A16["A16 输出组装<br/>SSE 或 JSON"]
+    A14 --> A16
+    A15 --> A16
+    A16 --> A17["A17 返回下游用户"]
 ```
 
 | 步骤ID | 运行行为 | 函数/类 | 文件路径 |
 | --- | --- | --- | --- |
 | A2 | 进入 OpenAI 兼容聊天路由 | `chat_completions` | `prisma-api/routes/chat.py` |
 | A3 | 提取 query/history/system/image，处理 `!deepthink_continue` | `_get_query` / `_build_history` / `_extract_system_prompt` / `_extract_image_parts` / `_parse_continue_command` | `prisma-api/routes/chat.py` |
-| A4 | 解析虚拟模型到真实模型、thinking level、provider | `_resolve_request` / `resolve_model` / `DeepThinkConfig` | `prisma-api/routes/chat.py` + `prisma-api/config.py` + `prisma-api/models.py` |
+| A4 | 解析虚拟模型或 `provider/model` 到真实模型、thinking level、provider | `_resolve_request` / `resolve_model` / `DeepThinkConfig` | `prisma-api/routes/chat.py` + `prisma-api/config.py` + `prisma-api/models.py` |
 | A5 | 创建或加载 checkpoint，控制同 `resume_id` 并发 | `CheckpointStore` / `_acquire_resume_id` / `_release_resume_id` | `prisma-api/engine/checkpoint_store.py` + `prisma-api/routes/chat.py` |
 | A6 | 启动统一编排器并持续产出 chunk | `run_deep_think` | `prisma-api/engine/orchestrator.py` |
 | A7 | 经理模型规划专家团队 | `analyze` | `prisma-api/engine/manager.py` |
 | A8 | 多专家并行非流式调用 | `run_expert` | `prisma-api/engine/expert.py` |
 | A9 | 审查结果并决定 keep/iterate/delete | `review` / `_apply_review_actions` | `prisma-api/engine/manager.py` + `prisma-api/engine/orchestrator.py` |
 | A10 | 汇总全部专家结果并流式输出 | `stream_synthesis` | `prisma-api/engine/synthesis.py` |
-| A11-A14 | 按 provider 转发到 Gemini/OpenAI 客户端 | `generate_json` / `generate_content` / `generate_content_stream` | `prisma-api/clients/llm_client.py` + `prisma-api/clients/gemini_client.py` + `prisma-api/clients/openai_client.py` |
-| A15 | 组装 SSE chunk 或非流式 JSON | `_generate_sse_stream` / `ChatCompletionResponse` | `prisma-api/routes/chat.py` + `prisma-api/models.py` |
+| A11-A15 | 按 provider 转发到 Gemini/OpenAI/OpenAI Responses 客户端 | `generate_json` / `generate_content` / `generate_content_stream` | `prisma-api/clients/llm_client.py` + `prisma-api/clients/gemini_client.py` + `prisma-api/clients/openai_client.py` + `prisma-api/clients/openai_responses_client.py` |
+| A16 | 组装 SSE chunk 或非流式 JSON | `_generate_sse_stream` / `ChatCompletionResponse` | `prisma-api/routes/chat.py` + `prisma-api/models.py` |
 
 ## 配置解析（Config Resolution）
 
@@ -50,7 +52,7 @@ flowchart TD
     C1 --> C6["C6 自定义虚拟模型<br/>VIRTUAL_MODELS_FILE / VIRTUAL_MODELS_EXTRA"]
     C6 --> C7["C7 合并与覆盖模型表"]
     C5 --> C7
-    C7 --> C8["C8 请求时 resolve_model(model_id)<br/>输出 model + thinking levels + max_rounds + provider"]
+    C7 --> C8["C8 请求时 resolve_model(model_id)<br/>支持虚拟模型与 provider/model"]
     C8 --> C9["C9 路由层生成 DeepThinkConfig<br/>或使用 prisma_config 覆盖"]
     C9 --> C10["C10 编排器按 level 取 budget<br/>get_thinking_budget"]
     C1 --> C11["C11 Prompt 覆盖链<br/>ENV_KEY_FILE > ENV_KEY > 默认值"]
@@ -63,7 +65,7 @@ flowchart TD
 | C3 | 读取全局开关和服务参数 | 模块级配置常量 | `prisma-api/config.py` |
 | C4 | 组装 provider 配置（含自定义 provider） | `ProviderConfig` / `_load_provider_configs` / `get_provider_config` | `prisma-api/config.py` |
 | C5-C7 | 默认虚拟模型与额外模型合并 | `VirtualModel` / `_load_extra_virtual_models` / `_merge_virtual_models` | `prisma-api/config.py` |
-| C8 | 请求模型解析 | `resolve_model` | `prisma-api/config.py` |
+| C8 | 请求模型解析（虚拟模型 / `provider/model`） | `resolve_model` | `prisma-api/config.py` |
 | C9 | 生成本次请求 DeepThink 配置 | `_resolve_request` / `DeepThinkConfig` | `prisma-api/routes/chat.py` + `prisma-api/models.py` |
 | C10 | 各阶段 thinking budget 计算 | `get_thinking_budget` | `prisma-api/config.py` |
 | C11-C12 | Prompt 覆盖优先级与运行时消息 | `_load_prompt` + 各 `*_PROMPT` / `MSG_*` 常量 | `prisma-api/prompts.py` |

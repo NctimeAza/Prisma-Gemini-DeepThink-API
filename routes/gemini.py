@@ -31,6 +31,8 @@ from config import (
     MAX_CONTEXT_MESSAGES,
     SSE_HEARTBEAT_INTERVAL,
     StageProviders,
+    resolve_expert_routing_config,
+    resolve_no_cliches_config,
     resolve_model,
     resolve_refinement_config,
     split_forced_model_suffix,
@@ -151,18 +153,35 @@ def _resolve_request_config(
     ) = resolve_model(model_id)
 
     refinement_kwargs: dict[str, Any] = {}
+    expert_routing_cfg = resolve_expert_routing_config(base_model_id)
+    no_cliches_cfg = resolve_no_cliches_config(
+        base_model_id, real_model, stage_providers,
+    )
     if mode == "refinement":
         ref_cfg = resolve_refinement_config(
-            base_model_id, real_model, mgr_model, syn_model,
+            base_model_id, real_model, mgr_model, syn_model, stage_providers,
         )
         refinement_kwargs = {
             "refinement_max_rounds": ref_cfg.refinement_max_rounds,
             "pre_draft_review_rounds": ref_cfg.pre_draft_review_rounds,
             "enable_json_repair": ref_cfg.enable_json_repair,
             "enable_text_cleaner": ref_cfg.enable_text_cleaner,
+            "refinement_planner_model": ref_cfg.refinement_planner_model,
+            "refinement_planner_provider": ref_cfg.refinement_planner_provider,
+            "pre_draft_expert_model": ref_cfg.pre_draft_expert_model,
+            "pre_draft_expert_provider": ref_cfg.pre_draft_expert_provider,
+            "pre_draft_review_model": ref_cfg.pre_draft_review_model,
+            "pre_draft_review_provider": ref_cfg.pre_draft_review_provider,
             "draft_model": ref_cfg.draft_model,
+            "draft_provider": ref_cfg.draft_provider,
             "review_model": ref_cfg.review_model,
+            "review_provider": ref_cfg.review_provider,
+            "improver_model": ref_cfg.improver_model,
+            "improver_provider": ref_cfg.improver_provider,
             "merge_model": ref_cfg.merge_model,
+            "merge_provider": ref_cfg.merge_provider,
+            "text_cleaner_model": ref_cfg.text_cleaner_model,
+            "text_cleaner_provider": ref_cfg.text_cleaner_provider,
             "json_repair_model": ref_cfg.json_repair_model,
         }
 
@@ -180,6 +199,16 @@ def _resolve_request_config(
         synthesis_temperature=synthesis_temp,
         json_via_prompt=json_via_prompt,
         forced_prefill_suffix=forced_prefill_suffix,
+        expert_model_pool=expert_routing_cfg.expert_model_pool,
+        enable_manager_expert_model_selection=(
+            expert_routing_cfg.enable_manager_expert_model_selection
+        ),
+        enable_review_expert_model_selection=(
+            expert_routing_cfg.enable_review_expert_model_selection
+        ),
+        enable_no_cliches=no_cliches_cfg.enable_no_cliches,
+        no_cliches_model=no_cliches_cfg.no_cliches_model,
+        no_cliches_provider=no_cliches_cfg.no_cliches_provider,
         **refinement_kwargs,
     )
     return real_model, mgr_model, syn_model, config, provider, stage_providers
@@ -541,6 +570,7 @@ async def _gemini_sse_stream(
         checkpoint.phase = "planning"
         checkpoint.status = "running"
         checkpoint.current_round = 1
+        checkpoint.status_content = ""
         checkpoint.reasoning_content = ""
         checkpoint.output_content = ""
         checkpoint.error_message = ""
@@ -562,14 +592,17 @@ async def _gemini_sse_stream(
     all_grounding: list[dict] = []
 
     try:
-        # resume hint as the first thought chunk (only if thoughts requested)
-        if include_thoughts:
-            hint_chunk = _build_gemini_stream_chunk(
-                thought=_resume_hint(checkpoint.resume_id),
-            )
-            yield f"data: {json.dumps(hint_chunk, ensure_ascii=False)}\n\n"
+        # resume hint is runtime status, always emit it.
+        hint_chunk = _build_gemini_stream_chunk(
+            thought=_resume_hint(checkpoint.resume_id),
+        )
+        yield f"data: {json.dumps(hint_chunk, ensure_ascii=False)}\n\n"
 
         if continue_mode:
+            for status_part in _iter_chunks(checkpoint.status_content):
+                replay_chunk = _build_gemini_stream_chunk(thought=status_part)
+                yield f"data: {json.dumps(replay_chunk, ensure_ascii=False)}\n\n"
+
             if include_thoughts:
                 for thought_part in _iter_chunks(checkpoint.reasoning_content):
                     replay_chunk = _build_gemini_stream_chunk(thought=thought_part)
@@ -584,7 +617,7 @@ async def _gemini_sse_stream(
                 yield f"data: {json.dumps(final_data, ensure_ascii=False)}\n\n"
                 return
 
-        async for text_chunk, thought_chunk, _phase, grounding in run_deep_think(
+        async for text_chunk, thought_chunk, phase, grounding in run_deep_think(
             query=query,
             history=history,
             image_parts=image_parts,
@@ -603,8 +636,13 @@ async def _gemini_sse_stream(
             if grounding:
                 all_grounding.extend(grounding)
 
-            # 如果不需要思维链，过滤掉 thought 内容
-            effective_thought = thought_chunk if include_thoughts else ""
+            # 运行时状态与专家原文回显都不属于模型思维链，Gemini 原生路由始终透传。
+            runtime_visible_phases = {"status", "experts"}
+            effective_thought = (
+                thought_chunk
+                if (include_thoughts or phase in runtime_visible_phases)
+                else ""
+            )
 
             if text_chunk or effective_thought:
                 chunk_data = _build_gemini_stream_chunk(
@@ -811,6 +849,7 @@ async def generate_content(model_name: str, raw_request: Request):
         checkpoint.phase = "planning"
         checkpoint.status = "running"
         checkpoint.current_round = 1
+        checkpoint.status_content = ""
         checkpoint.reasoning_content = ""
         checkpoint.output_content = ""
         checkpoint.error_message = ""
@@ -831,15 +870,15 @@ async def generate_content(model_name: str, raw_request: Request):
 
     try:
         full_text = checkpoint.output_content if continue_mode else ""
-        full_reasoning = ""
-        if include_thoughts:
-            full_reasoning = _resume_hint(checkpoint.resume_id)
-            if continue_mode:
+        full_reasoning = _resume_hint(checkpoint.resume_id)
+        if continue_mode:
+            full_reasoning += checkpoint.status_content
+            if include_thoughts:
                 full_reasoning += checkpoint.reasoning_content
         all_grounding: list[dict] = []
 
         if not replay_only:
-            async for text_chunk, thought_chunk, _phase, grounding in run_deep_think(
+            async for text_chunk, thought_chunk, phase, grounding in run_deep_think(
                 query=query,
                 history=history,
                 image_parts=image_parts,
@@ -856,7 +895,7 @@ async def generate_content(model_name: str, raw_request: Request):
                 stage_providers=stage_providers,
             ):
                 full_text += text_chunk
-                if include_thoughts:
+                if include_thoughts or phase in {"status", "experts"}:
                     full_reasoning += thought_chunk
                 if grounding:
                     all_grounding.extend(grounding)

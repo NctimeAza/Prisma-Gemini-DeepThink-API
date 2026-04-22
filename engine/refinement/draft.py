@@ -44,16 +44,12 @@ def _build_draft_prompt(
         )
     experts_xml = "\n\n".join(expert_xml_parts)
 
-    user_instruction = ""
-    if user_system_prompt:
-        user_instruction = f"\n\n用户的重要指示：\n{user_system_prompt}"
-
     return (
         f"对话上下文：\n{context}\n\n"
         f'用户原始需求："{query}"\n\n'
         f"以下是各专家提供的领域素材：\n"
         f"{experts_xml}\n\n"
-        f"{REFINEMENT_DRAFT_PROMPT}{user_instruction}"
+        f"{REFINEMENT_DRAFT_PROMPT}"
     )
 
 
@@ -93,6 +89,7 @@ async def generate_draft(
     kwargs: dict = {
         "model": model,
         "contents": contents,
+        "system_instruction": user_system_prompt or None,
         "thinking_budget": budget,
         "image_parts": None,
         "provider": provider,

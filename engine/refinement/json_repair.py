@@ -11,6 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
+import clients.openai_client as _chat_client
 from clients.llm_client import generate_content
 from config import (
     JSON_REPAIR_DEBUG_DIR,
@@ -151,9 +152,9 @@ async def try_repair_json(
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             text = "\n".join(lines)
-        cleaned_response = text
+        cleaned_response = _chat_client._clean_json_string(text)  # noqa: SLF001
 
-        parsed = json.loads(text)
+        parsed = json.loads(cleaned_response)
         _write_debug_bundle(
             phase="success",
             model=model,
@@ -204,7 +205,8 @@ async def parse_json_with_repair(
         json.JSONDecodeError: 解析和修复均失败.
     """
     try:
-        return json.loads(raw_text)
+        cleaned = _chat_client._clean_json_string(raw_text)  # noqa: SLF001
+        return json.loads(cleaned)
     except json.JSONDecodeError:
         if not enable_repair or not repair_model:
             raise

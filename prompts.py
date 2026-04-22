@@ -15,7 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from config import APP_LANGUAGE
-from models import ExpertResult, ReviewResult
+from models import ExpertModelProfile, ExpertResult, ReviewResult
 
 load_dotenv()
 
@@ -70,6 +70,29 @@ def _select_runtime_text(zh_text: str, en_text: str) -> str:
     return en_text if APP_LANGUAGE == "en" else zh_text
 
 
+def format_expert_model_pool_note(
+    expert_model_pool: list[ExpertModelProfile] | None,
+) -> str:
+    """格式化可选专家执行底模提示."""
+    if not expert_model_pool:
+        return ""
+
+    lines = [
+        "可选专家执行底模池说明：",
+        "如果某位专家明显更适合某个底模，请在该专家 JSON 中填写 expert_model；",
+        "若没有明显必要，可留空，系统会走当前流程默认专家模型。",
+        "expert_model 只能填写以下 id：",
+    ]
+    for profile in expert_model_pool:
+        provider = profile.provider or "默认 expert provider"
+        description = profile.description or "未提供说明"
+        lines.append(
+            f"- {profile.id}: {description} "
+            f"(actual_model={profile.model}, provider={provider})"
+        )
+    return "\n".join(lines)
+
+
 # ============================================================
 # Manager 规划阶段 System Prompt
 # ============================================================
@@ -79,7 +102,7 @@ _DEFAULT_MANAGER_SYSTEM_PROMPT = (
     "并依据复杂度将其分解为由4到10位专业领域专家角色组成的专家团队。\n\n"
     "重要机制说明：\n"
     "- 所有专家将同时并行启动，各自独立分析问题的不同角度\n"
-    "- 专家之间无法相互通信或看到彼此的输出\n"
+    "- **专家之间无法相互通信或看到彼此的输出**\n"
     "- 因此，你设计的每位专家必须能独立完成自己的任务，"
     "不能依赖其他专家的结果\n"
     "- 不要设计有先后顺序依赖的专家（如'先调研再设计'），"
@@ -88,16 +111,16 @@ _DEFAULT_MANAGER_SYSTEM_PROMPT = (
     "你是一个通用推理框架，服务于各类用户需求（包括但不限于科学研究、技术分析、"
     "创意写作、角色扮演、文学创作等）。"
     "设计专家时，应确保所选角色能够积极配合用户的意图（即使涉及特殊需求），"
-    "而非因为角色的'专业人格'与用户需求不匹配而产生冲突。"
+    "而非因为角色的“专业人格”与用户需求不匹配而产生冲突。"
     "如果用户的指示中包含特定的创作方向或风格要求，"
     "你设计的专家应当能够自然地服务于该方向。\n\n"
-    "由于后续有一个单独的Synthesis来结合各维度的回答撰写最终的正文，"
+    "后续有一个单独的Synthesis来结合各维度的回答撰写最终的正文，"
     "你的工作是**精细化划分专家职责**。不应让所有专家都在尝试回答所有的事，"
     "而应该让不同的专家专注于问题的不同切入点（例如有的专攻背景资料收集、有的专攻风险评估、有的专攻某一特定视角的解构）。\n\n"
     "此外，对于专家名单的划分，指派的专家名不能混杂括号注释语言，"
     "例如必须使用纯中文或纯英文作为专家名称，此外特例，"
     "可以接受“UI设计师”这种约定俗成的名词，"
-    "但不接受“UI设计师（Designer）”这种莫名其妙带个括号注释的。\n\n"
+    "但不接受“UI设计师（UI Designer）”这种带个括号注释的。\n\n"
     "对于每位专家，你应根据其任务性质分配特定的温度值"
     "（0.0 到 2.0，创意写作、翻译类任务推荐1以上）：\n\n"
     "*   中高温度（1.1 - 2.0）\n"
@@ -128,7 +151,7 @@ _DEFAULT_MANAGER_REVIEW_SYSTEM_PROMPT = (
     "专家只负责提供某一维度的素材或观点，**最终综合与撰写正文由后续单独的综合阶段负责**。"
     "因此，绝对不要指责仅负责资料收集、风险评估或提供思路的专家“没有直接回答最终问题”或“不输出完整正文”。只要他提供了符合其职责的高质量内容即为合格。\n"
     "- 专家忠实执行用户指示中的要求是正确行为，不应被视为问题。\n"
-    "- 评估标准应基于当前维度的输出质量和与用户意图的一致性，"
+    "- 评估标准应基于当前维度的输出质量和与**用户意图**的一致性，"
     "而非你自身对内容的偏好。\n\n"
     "审查锐评（review_critique）要求：\n"
     "请对每个专家进行锐评，各给4个等级之一：很满意（几乎符合所有要求）、还不错（有些小问题）、平庸（能符合一些需求但也有不少毛病）、不满意（令人愤怒，毛病多，符合要求的部分少），并简述原因。简评应比详细的critique要简短很多。\n\n"
@@ -204,6 +227,11 @@ _DEFAULT_EXPERT_USER_INSTRUCTION_PREFIX = "用户的重要指示："
 
 EXPERT_USER_INSTRUCTION_PREFIX: str = _load_prompt(
     "EXPERT_USER_INSTRUCTION_PREFIX", _DEFAULT_EXPERT_USER_INSTRUCTION_PREFIX
+)
+
+EXPERT_HIDDEN_OUTPUT_EN_INSTRUCTION: str = (
+    "The user cannot see your intermediate reply. Do not greet, chat, or add filler. "
+    "Focus only on producing the task output that directly serves the user's request."
 )
 
 # Expert 确认预填充（多轮对话技巧，提高执行力）
@@ -503,10 +531,9 @@ def get_expert_system_instruction(
             description=description,
             context=context,
             all_experts="、".join(dict.fromkeys(roles)),
-        )
+        ),
+        EXPERT_HIDDEN_OUTPUT_EN_INSTRUCTION,
     ]
-    if user_system_prompt:
-        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
     return "\n\n".join(parts)
 
 
@@ -651,19 +678,13 @@ def get_synthesis_prompt(
 
     expert_outputs = "\n\n".join(rounds_str_parts)
 
-    user_instruction = ""
-    if user_system_prompt:
-        user_instruction = (
-            f"\n\n{SYNTHESIS_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}"
-        )
-
     return (
         f"上下文：\n{recent_history}\n\n"
         f"用户原始查询：\"{query}\"\n\n"
         f"以下是你专家团队的分析结果"
         f"（可能跨越多个优化轮次）：\n"
         f"{expert_outputs}\n\n"
-        f"{SYNTHESIS_ROLE}{user_instruction}\n\n"
+        f"{SYNTHESIS_ROLE}\n\n"
         f"{SYNTHESIS_TASK_INSTRUCTIONS}"
     )
 
@@ -763,16 +784,18 @@ _DEFAULT_REFINEMENT_REVIEW_PROMPT = (
     "你是精修审查助手。你将收到初稿的按行切分内容（JSON数组格式），"
     "以及用户的原始需求与对话上下文（若有）。\n\n"
     "你的任务：\n"
-    "1. 仔细分析初稿中存在的违反用户需求、质量不佳、可以改进的地方。\n"
+    "1. 用户至上：仔细分析初稿中存在的违反用户需求、质量不佳、可以改进的地方。\n"
     "2. 分配多个改进专家，每个专家负责特定维度的修补工作。\n"
     "3. 向每个改进专家提供额外的指导信息。\n\n"
     "4. 保持吹毛求疵的态度，尽可能让最终成品足够完美"
     "注意：\n"
     "- 每个改进专家也需要注入当前所有已分配改进专家的信息，严格规定其职责范围。\n"
+    "- 当问题分散在多个独立维度时，优先多分配一些小而专的改进专家，除非确实没什么大问题。不必只分配一两个专家；通常可考虑 3-6 个，必要时更多。\n"
     "- 分配改进专家时，尽量减少职责重叠；除非确有必要，不要让多个专家同时修改同一行或同一小段内容。\n"
-    "- 给每个改进专家的 prompt 应尽量写清优先处理的问题或行段，避免“泛化重写全文”式任务。\n"
-    "- 改进专家只能通过 modify（修改行）、add（在行后添加）、remove（删除行）操作来修改初稿。\n"
+    "- 给每个改进专家的prompt应尽量写清优先处理的问题或行段，避免“泛化重写全文”式任务。\n"
+    "- 改进专家只能通过modify（修改行）、add（在行后添加）、remove（删除行）操作来修改初稿。\n"
     "- 每个专家包含：role（纯中文或纯英文，不带括号注释）、domain（严格负责领域）、temperature（0.0-2.0）、prompt（具体任务指令）。\n"
+    "- 如果issues明显跨越文风、结构、叙事、逻辑、信息密度、细节铺陈、台词、节奏、世界观一致性等多个方面，应拆成多个专家并行处理。\n"
     "- 温度分配参考：创意写作/翻译/头脑风暴类推荐1.2-2.0，分析/资料类推荐0.4-1.0，编程/科研任务0.0-0.4\n\n"    
     "{iteration_note}\n\n"
     "输出 JSON 格式：\n"
@@ -885,6 +908,74 @@ _DEFAULT_REFINEMENT_CLEANER_PROMPT = (
 
 REFINEMENT_CLEANER_PROMPT: str = _load_prompt(
     "REFINEMENT_CLEANER_PROMPT", _DEFAULT_REFINEMENT_CLEANER_PROMPT
+)
+
+# --- 强力杀八股专家 ---
+
+_DEFAULT_REFINEMENT_NO_CLICHES_PERSONA = (
+    "你是AI clichés 去除改写文学大师。"
+    "你的唯一任务是清洗文本中的八股词、八股句式和机械AI味，降低AI率，提升人味（AI的文章总是很完美的，但完美的文章往往缺少人味）。"
+)
+
+REFINEMENT_NO_CLICHES_PERSONA: str = _load_prompt(
+    "REFINEMENT_NO_CLICHES_PERSONA",
+    _DEFAULT_REFINEMENT_NO_CLICHES_PERSONA,
+)
+
+_DEFAULT_REFINEMENT_NO_CLICHES_CLICHE_LIST = """
+说明文本/实用文体生成与去AI惯用的文学表达规范：
+**（注：切忌矫枉过正，此处仅为规范AI令其文本风格远离机械八股化，例如将表达层次丰满完美但八股化较为严重的段落使用合乎规范的表达重写，不应为了合乎规范直接删光句子中的一切修辞，导致句子变得干巴，影响文章整体主题风格，以至于将欢快的主题写得过于平然）**
+- 文本中需要警惕和优化的的过拟合八股文风：一切近年网文或刘慈欣作品文风，例如《三体》，其风格对AI的简中表达污染较大；《乡土中国》，对简中说明文也有一定污染
+
+- 替换文风参考作品：《圣经和合本》（通用）、《文化苦旅》（小说、散文）、《快乐的科学》（通用）、《人类简史》（说明文）
+
+- 逻辑与句式处理
+  - 表达转折或递进时，优先陈述最终事实即可。优化“不是/并非/没有A，而是/只是/是B”、“这哪里是A，分明是B”等虚设对比（翻译任务原文带此逻辑除外）。某对象没有做[A动作]，只是做[B动作]，这种表达也应优先描写对象实际执行的具体动作[B]
+    - 这种not..but..的句式，全文最多只能出现3次
+  - 删去“这恰恰说明”、“某种意义上”、“命运的齿轮”等总结与说教。
+  - 优化**“在了解X之前，你必须知道Y/要想明白X，首先得知道Y”等表达**，用更自然朴实的过渡。这本质是想表达有Y这个因才间接或直接导致了X结果，但一般的，描述Y并重点描述其中和X有关的因素，最后再自然连接到X即可。
+
+- 描写与修饰精简
+  - 每个名词或动词前尽可能只保留一个**最确切**的修饰语。**去除或优化“缓慢而坚定”、“清澈甘甜”等双状语/定语叠用等表达。**
+  - 表达重要性时，使用“主要”、“基础”等日常词。**去除或优化“核心（通常是英文里的Ke映射到中文导致）”“基石”、“降维打击”、“降维”、“精确”、“直接”等高权重表达。**
+  - “极其”、“猛地”、“死死”、“死磕”、“一丝”、“疯狂”等夸张的修饰表达，删去或替换为更符合人类表达习惯的词语。
+  - 首先，减少比喻。其次，打比喻解释时，跳过“想象一下”、“这就好比”等引导语，将本体和喻体划等号即可。
+  - 使用暗语、借喻、借代、博喻、双关等修辞手法**代替**明喻
+"""
+REFINEMENT_NO_CLICHES_CLICHE_LIST: str = _load_prompt(
+    "REFINEMENT_NO_CLICHES_CLICHE_LIST",
+    _DEFAULT_REFINEMENT_NO_CLICHES_CLICHE_LIST,
+)
+
+_DEFAULT_REFINEMENT_NO_CLICHES_PROMPT = (
+    "你将收到一份按行切分的文本（JSON 数组）。\n"
+    "你只能看这份文本本身，不能补充新事实，不能改结构，不能重写成另一篇文章。\n\n"
+    "你的任务：\n"
+    "1. 参考“说明文本/实用文体生成与去AI惯用的文学表达规范”找出文本里带有明显AI味、套话味、八股味的行。\n"
+    "2. 优先处理词汇层面的clichés；只有在词汇层处理不够时，才处理句式层。\n"
+    "3. 对命中的行执行最小必要修改：要么改写整行，要么删除整行（一般最好不要）。\n\n"
+    "输出要求：\n"
+    "1. 只输出 JSON，不要输出 markdown、代码块或额外说明。\n"
+    "2. 输出格式：\n"
+    "{\n"
+    "  \"analysis\": \"简短分析\",\n"
+    "  \"operations\": [\n"
+    "    {\"action\": \"modify\", \"line\": 3, \"content\": \"改写后的整行文本\", \"reason\": \"替换八股词\"},\n"
+    "    {\"action\": \"remove\", \"line\": 8, \"reason\": \"整行空泛八股\"}\n"
+    "  ]\n"
+    "}\n\n"
+    "规则：\n"
+    "- operations 只允许 action=modify 或 remove；禁止 add。\n"
+    "- line 使用 1-based 行号，基于输入文本行号。\n"
+    "- modify 必须提供 content，且 content 必须是一整行文本。\n"
+    "- 不应引入输入里没有的新事实。\n"
+    "- 不应为了追求文采制造新修辞；目标是降低AI味，不是炫技。\n"
+    "- 如果一行没有明显八股问题，不要动它。"
+)
+
+REFINEMENT_NO_CLICHES_PROMPT: str = _load_prompt(
+    "REFINEMENT_NO_CLICHES_PROMPT",
+    _DEFAULT_REFINEMENT_NO_CLICHES_PROMPT,
 )
 
 # --- 精修流程状态消息 ---
@@ -1035,6 +1126,54 @@ MSG_REFINEMENT_CLEAN_DONE: str = _load_prompt(
     ),
 )
 
+MSG_NO_CLICHES_EXPERT_START: str = _load_prompt(
+    "MSG_NO_CLICHES_EXPERT_START",
+    _select_runtime_text(
+        "正在对专家「{expert_name}」执行 no-clichés 清洗。",
+        'Running no-clichés cleanup for expert "{expert_name}".',
+    ),
+)
+
+MSG_NO_CLICHES_EXPERT_DONE: str = _load_prompt(
+    "MSG_NO_CLICHES_EXPERT_DONE",
+    _select_runtime_text(
+        "专家「{expert_name}」的 no-clichés 清洗完成：删除 {removed} 行 / 修改 {modified} 行。",
+        'Expert "{expert_name}" no-clichés cleanup done: removed {removed} / modified {modified}.',
+    ),
+)
+
+MSG_NO_CLICHES_EXPERT_ERROR: str = _load_prompt(
+    "MSG_NO_CLICHES_EXPERT_ERROR",
+    _select_runtime_text(
+        "专家「{expert_name}」的 no-clichés 清洗失败，已保留原文。",
+        'Expert "{expert_name}" no-clichés cleanup failed; original text kept.',
+    ),
+)
+
+MSG_NO_CLICHES_DRAFT_START: str = _load_prompt(
+    "MSG_NO_CLICHES_DRAFT_START",
+    _select_runtime_text(
+        "正在执行 no-clichés 草稿清洗（{stage}）。",
+        "Running no-clichés draft cleanup ({stage}).",
+    ),
+)
+
+MSG_NO_CLICHES_DRAFT_DONE: str = _load_prompt(
+    "MSG_NO_CLICHES_DRAFT_DONE",
+    _select_runtime_text(
+        "no-clichés 草稿清洗完成（{stage}）：删除 {removed} 行 / 修改 {modified} 行。",
+        "no-clichés draft cleanup done ({stage}): removed {removed} / modified {modified}.",
+    ),
+)
+
+MSG_NO_CLICHES_DRAFT_ERROR: str = _load_prompt(
+    "MSG_NO_CLICHES_DRAFT_ERROR",
+    _select_runtime_text(
+        "no-clichés 草稿清洗失败（{stage}），已保留原稿。",
+        "no-clichés draft cleanup failed ({stage}); original draft kept.",
+    ),
+)
+
 MSG_REFINEMENT_CLEAN_ERROR: str = _load_prompt(
     "MSG_REFINEMENT_CLEAN_ERROR",
     _select_runtime_text(
@@ -1088,8 +1227,6 @@ def get_refinement_expert_system_instruction(
         ),
         REFINEMENT_EXPERT_OUTPUT_RULES,
     ]
-    if user_system_prompt:
-        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
     return "\n\n".join(parts)
 
 
@@ -1148,6 +1285,4 @@ def get_refinement_improver_system_instruction(
             guidance=guidance or "无额外指导。",
         )
     ]
-    if user_system_prompt:
-        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
     return "\n\n".join(parts)

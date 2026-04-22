@@ -15,6 +15,7 @@ from prompts import (
     MANAGER_REVIEW_SYSTEM_PROMPT,
     ROUNDS_ENCOURAGEMENT,
     build_prefill_contents,
+    format_expert_model_pool_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
                     "description": {"type": "STRING"},
                     "temperature": {"type": "NUMBER"},
                     "prompt": {"type": "STRING"},
+                    "expert_model": {"type": "STRING"},
                 },
                 "required": ["role", "description", "temperature", "prompt"],
             },
@@ -54,6 +56,7 @@ _EXPERT_CONFIG_SCHEMA: dict[str, Any] = {
         "description": {"type": "STRING"},
         "temperature": {"type": "NUMBER"},
         "prompt": {"type": "STRING"},
+        "expert_model": {"type": "STRING"},
     },
     "required": ["role", "description", "temperature", "prompt"],
 }
@@ -175,7 +178,114 @@ def _normalize_review_actions(raw_actions: Any) -> list[dict[str, Any]]:
             continue
         cleaned = dict(item)
         cleaned["action"] = _normalize_action_name(item.get("action"))
+        cleaned["reason"] = _stringify_field(item.get("reason"))
+        cleaned["strict_prompt"] = _stringify_field(item.get("strict_prompt"))
+        cleaned["improvement_suggestions"] = _stringify_field(
+            item.get("improvement_suggestions")
+        )
+        cleaned["target_expert_id"] = _stringify_field(item.get("target_expert_id"))
+        cleaned["target_expert_role"] = _stringify_field(
+            item.get("target_expert_role")
+        )
+        cleaned["iterated_expert"] = _normalize_expert_config_payload(
+            item.get("iterated_expert")
+        )
         normalized.append(cleaned)
+    return normalized
+
+
+def _stringify_field(value: Any) -> str:
+    """将模型漂移字段稳态化为字符串。"""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [_stringify_field(item) for item in value]
+        return "\n".join(part for part in parts if part).strip()
+    if isinstance(value, dict):
+        for key in ("text", "content", "value", "reason", "description"):
+            text = _stringify_field(value.get(key))
+            if text:
+                return text
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _coerce_temperature(value: Any, default: float = 1.0) -> float:
+    """尽量把温度字段转成 float。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_expert_config_payload(raw_item: Any) -> dict[str, Any] | None:
+    """兼容模型在 fallback JSON 中返回的相近专家字段名。"""
+    if not isinstance(raw_item, dict):
+        return None
+
+    role = _stringify_field(
+        raw_item.get("role")
+        or raw_item.get("name")
+        or raw_item.get("expert_name")
+    )
+    description = _stringify_field(
+        raw_item.get("description")
+        or raw_item.get("domain")
+        or raw_item.get("focus")
+        or role
+    )
+    prompt = _stringify_field(
+        raw_item.get("prompt")
+        or raw_item.get("task")
+        or raw_item.get("instruction")
+        or raw_item.get("mission")
+    )
+    return {
+        "role": role,
+        "description": description,
+        "temperature": _coerce_temperature(raw_item.get("temperature"), 1.0),
+        "prompt": prompt,
+        "expert_model": _stringify_field(
+            raw_item.get("expert_model")
+            or raw_item.get("expert_model_id")
+            or raw_item.get("model_id")
+            or raw_item.get("model")
+        ),
+    }
+
+
+def _normalize_expert_config_list(raw_experts: Any) -> list[dict[str, Any]]:
+    """兼容 refined_experts 的字段漂移。"""
+    if not isinstance(raw_experts, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw_experts:
+        cfg = _normalize_expert_config_payload(item)
+        if cfg is None:
+            continue
+        normalized.append(cfg)
+    return normalized
+
+
+def _normalize_review_payload(result: dict[str, Any]) -> dict[str, Any]:
+    """兼容文本 fallback 返回的字段漂移。"""
+    normalized = dict(result)
+    normalized["review_critique"] = _stringify_field(result.get("review_critique"))
+    normalized["overall_rejection_reason"] = _stringify_field(
+        result.get("overall_rejection_reason")
+    )
+    normalized["critique"] = _stringify_field(result.get("critique"))
+    normalized["next_round_strategy"] = _stringify_field(
+        result.get("next_round_strategy")
+    )
+    normalized["refined_experts"] = _normalize_expert_config_list(
+        result.get("refined_experts", [])
+    )
+    normalized["expert_actions"] = _normalize_review_actions(
+        result.get("expert_actions", [])
+    )
     return normalized
 
 
@@ -216,6 +326,8 @@ async def analyze(
     image_parts: list[dict] | None = None,
     provider: str = "",
     json_via_prompt: bool = False,
+    expert_model_pool: list | None = None,
+    enable_expert_model_selection: bool = False,
 ) -> AnalysisResult:
     """Manager 规划阶段：分析用户问题，分解为 Expert 任务.
 
@@ -230,21 +342,25 @@ async def analyze(
     Returns:
         AnalysisResult 包含 thought_process 和 experts 列表.
     """
-    sys_section = (
-        f"\n用户的重要指示：{user_system_prompt}" if user_system_prompt else ""
-    )
-    text_prompt = f'Context:\n{context}{sys_section}\n\nCurrent Query: "{query}"'
+    text_prompt = f'Context:\n{context}\n\nCurrent Query: "{query}"'
+    expert_model_note = ""
+    if enable_expert_model_selection:
+        expert_model_note = format_expert_model_pool_note(expert_model_pool)
     contents = build_prefill_contents(
         text_prompt,
         image_parts=image_parts,
-        leading_instruction=MANAGER_SYSTEM_PROMPT,
+        leading_instruction="\n\n".join(
+            part
+            for part in [MANAGER_SYSTEM_PROMPT, expert_model_note]
+            if part
+        ),
     )
 
     try:
         result = await generate_json(
             model=model,
             contents=contents,
-            system_instruction="",
+            system_instruction=user_system_prompt or None,
             response_schema=ANALYSIS_SCHEMA,
             thinking_budget=budget,
             temperature=temperature,
@@ -299,6 +415,8 @@ async def review(
     previous_reviews: list[ReviewResult] | None = None,
     provider: str = "",
     json_via_prompt: bool = False,
+    expert_model_pool: list | None = None,
+    enable_expert_model_selection: bool = False,
 ) -> ReviewResult:
     """Manager 审查阶段：评估 Expert 输出质量.
 
@@ -359,11 +477,6 @@ async def review(
 
     expert_outputs = "\n\n".join(rounds_str_parts)
     context_section = f"对话上下文：\n{context}\n\n" if context else ""
-    sys_section = (
-        f"用户的重要指示：{user_system_prompt}\n\n"
-        if user_system_prompt else ""
-    )
-
     rounds_encouragement = ""
     if remaining_rounds > 0:
         rounds_encouragement = ROUNDS_ENCOURAGEMENT.format(
@@ -372,7 +485,6 @@ async def review(
 
     content = (
         f"{context_section}"
-        f"{sys_section}"
         f"{rounds_encouragement}"
         f'用户查询："{query}"\n\n'
         f"当前专家输出：\n{expert_outputs}"
@@ -380,14 +492,25 @@ async def review(
     contents = build_prefill_contents(
         content,
         image_parts=image_parts,
-        leading_instruction=MANAGER_REVIEW_SYSTEM_PROMPT,
+        leading_instruction="\n\n".join(
+            part
+            for part in [
+                MANAGER_REVIEW_SYSTEM_PROMPT,
+                (
+                    format_expert_model_pool_note(expert_model_pool)
+                    if enable_expert_model_selection
+                    else ""
+                ),
+            ]
+            if part
+        ),
     )
 
     try:
         result = await generate_json(
             model=model,
             contents=contents,
-            system_instruction="",
+            system_instruction=user_system_prompt or None,
             response_schema=REVIEW_SCHEMA,
             thinking_budget=budget,
             temperature=temperature,
@@ -402,10 +525,7 @@ async def review(
             json.dumps(result, ensure_ascii=False, indent=2),
         )
 
-        normalized = dict(result)
-        normalized["expert_actions"] = _normalize_review_actions(
-            result.get("expert_actions", [])
-        )
+        normalized = _normalize_review_payload(result)
 
         review_result = ReviewResult(**normalized)
         logger.info(

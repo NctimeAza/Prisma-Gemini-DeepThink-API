@@ -2,7 +2,8 @@
 
 Business layers import this module and stay provider-agnostic.
 Provider is now resolved per-call based on the ``provider`` argument,
-which maps to a registered ProviderConfig (gemini / openai / custom).
+which maps to a registered ProviderConfig (gemini / openai /
+openai_responses / custom).
 """
 
 import logging
@@ -15,10 +16,11 @@ logger = logging.getLogger(__name__)
 # 延迟 import，避免循环依赖
 import clients.gemini_client as _gemini
 import clients.openai_client as _openai
+import clients.openai_responses_client as _openai_responses
 
 
 def _resolve_type(provider: str) -> str:
-    """将 provider 名称解析为底层 API 类型 ("gemini" 或 "openai")."""
+    """将 provider 名称解析为底层 API 类型。"""
     cfg = get_provider_config(provider)
     return cfg.type
 
@@ -56,6 +58,17 @@ async def generate_json(
     api_type = _resolve_type(p)
     if api_type == "gemini":
         return await _gemini.generate_json(
+            model, contents, system_instruction,
+            response_schema, thinking_budget,
+            temperature=temperature,
+            top_p=top_p,
+            image_parts=image_parts,
+            debug_info=debug_info,
+            provider=p,
+            json_via_prompt=json_via_prompt,
+        )
+    if api_type == "openai_responses":
+        return await _openai_responses.generate_json(
             model, contents, system_instruction,
             response_schema, thinking_budget,
             temperature=temperature,
@@ -114,6 +127,16 @@ async def generate_content(
             image_parts=image_parts,
             provider=p,
         )
+    if api_type == "openai_responses":
+        return await _openai_responses.generate_content(
+            model, contents,
+            system_instruction=system_instruction,
+            temperature=temperature,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            image_parts=image_parts,
+            provider=p,
+        )
     return await _openai.generate_content(
         model, contents,
         system_instruction=system_instruction,
@@ -163,8 +186,19 @@ async def generate_content_stream(
             provider=p,
         ):
             yield chunk
-    else:
+    elif api_type == "openai":
         async for chunk in _openai.generate_content_stream(
+            model, contents,
+            system_instruction=system_instruction,
+            temperature=temperature,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            image_parts=image_parts,
+            provider=p,
+        ):
+            yield chunk
+    else:
+        async for chunk in _openai_responses.generate_content_stream(
             model, contents,
             system_instruction=system_instruction,
             temperature=temperature,

@@ -309,18 +309,54 @@ def _normalize_messages(
     return messages
 
 
-def _lower_schema_types(value: Any) -> Any:
+def _normalize_json_schema(value: Any) -> Any:
+    """标准化 JSON Schema，适配 OpenAI strict structured outputs。
+
+    规则：
+    1. 所有 ``type`` 字段统一转小写。
+    2. 所有对象节点都显式补 ``additionalProperties: false``。
+    3. 递归处理 ``properties``、组合 schema、数组项等嵌套结构。
+    """
     if isinstance(value, list):
-        return [_lower_schema_types(v) for v in value]
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for k, v in value.items():
-            if k == "type" and isinstance(v, str):
-                out[k] = v.lower()
+        return [_normalize_json_schema(v) for v in value]
+
+    if not isinstance(value, dict):
+        return value
+
+    out: dict[str, Any] = {}
+    normalized_type: Any = None
+    for k, v in value.items():
+        if k == "type":
+            if isinstance(v, str):
+                normalized_type = v.lower()
+            elif isinstance(v, list):
+                normalized_type = [
+                    item.lower() if isinstance(item, str) else item for item in v
+                ]
             else:
-                out[k] = _lower_schema_types(v)
-        return out
-    return value
+                normalized_type = v
+            out[k] = normalized_type
+            continue
+
+        out[k] = _normalize_json_schema(v)
+
+    is_object_schema = normalized_type == "object" or (
+        isinstance(normalized_type, list) and "object" in normalized_type
+    )
+    properties = out.get("properties")
+    has_properties = isinstance(properties, dict)
+    if (is_object_schema or has_properties) and "additionalProperties" not in out:
+        out["additionalProperties"] = False
+    if has_properties:
+        # OpenAI strict structured outputs 要求 required 必须覆盖 properties 中的全部键。
+        out["required"] = list(properties.keys())
+
+    return out
+
+
+def _lower_schema_types(value: Any) -> Any:
+    """兼容旧调用名，实际执行完整 schema 标准化。"""
+    return _normalize_json_schema(value)
 
 
 def _build_json_prompt_guard(schema: dict[str, Any]) -> str:
@@ -518,7 +554,7 @@ async def generate_json(
         debug_info["provider"] = provider or LLM_PROVIDER
         debug_info["raw_text"] = raw_text or ""
         debug_info["cleaned_text"] = cleaned or ""
-    return json.loads(cleaned)
+    return _parse_json_lenient(cleaned)
 
 
 async def generate_content(
@@ -655,9 +691,63 @@ def _clean_json_string(s: str) -> str:
     if md_match:
         return md_match.group(1).strip()
 
-    first_open = s.find("{")
-    last_close = s.rfind("}")
-    if first_open != -1 and last_close != -1 and last_close > first_open:
-        return s[first_open : last_close + 1]
+    extracted = _extract_first_complete_json_object(s)
+    if extracted:
+        return extracted
 
     return s.strip() if s.strip().startswith("{") else "{}"
+
+
+def _parse_json_lenient(s: str) -> Any:
+    """尽量解析首个合法 JSON 值，容忍尾随杂质文本。"""
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError as exc:
+        stripped = (s or "").lstrip()
+        decoder = json.JSONDecoder()
+        try:
+            parsed, _end = decoder.raw_decode(stripped)
+            return parsed
+        except json.JSONDecodeError:
+            raise exc
+
+
+def _extract_first_complete_json_object(s: str) -> str:
+    """提取文本中的第一个完整 JSON 对象。
+
+    用于处理模型正文后附带 SDK 元数据或其他尾随文本的场景。
+    """
+    start = s.find("{")
+    if start == -1:
+        return ""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(s)):
+        ch = s[idx]
+
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : idx + 1].strip()
+
+    return ""

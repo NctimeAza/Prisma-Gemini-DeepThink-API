@@ -11,12 +11,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import (
-    GEMINI_API_KEY,
-    GEMINI_BASE_URL,
     HOST,
     LLM_PROVIDER,
-    OPENAI_API_KEY,
-    OPENAI_BASE_URL,
     PORT,
     PROVIDER_CONFIGS,
 )
@@ -94,6 +90,11 @@ async def list_models():
                 "owned_by": "prisma",
                 "description": vm.desc,
                 "provider": vm.provider or LLM_PROVIDER,
+                "stage_providers": {
+                    "manager": vm.manager_provider or vm.provider or LLM_PROVIDER,
+                    "expert": vm.expert_provider or vm.provider or LLM_PROVIDER,
+                    "synthesis": vm.synthesis_provider or vm.provider or LLM_PROVIDER,
+                },
             }
             for vm in VIRTUAL_MODELS
         ],

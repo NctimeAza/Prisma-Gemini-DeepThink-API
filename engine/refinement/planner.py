@@ -10,7 +10,11 @@ from typing import Any
 
 from clients.llm_client import generate_json
 from models import RefinementExpertConfig
-from prompts import REFINEMENT_PLANNER_PROMPT, build_prefill_contents
+from prompts import (
+    REFINEMENT_PLANNER_PROMPT,
+    build_prefill_contents,
+    format_expert_model_pool_note,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,7 @@ REFINEMENT_PLANNING_SCHEMA: dict[str, Any] = {
                     },
                     "temperature": {"type": "NUMBER"},
                     "prompt": {"type": "STRING"},
+                    "expert_model": {"type": "STRING"},
                 },
                 "required": ["role", "domain", "temperature", "prompt"],
             },
@@ -54,6 +59,8 @@ async def plan(
     image_parts: list[dict] | None = None,
     provider: str = "",
     json_via_prompt: bool = False,
+    expert_model_pool: list | None = None,
+    enable_expert_model_selection: bool = False,
 ) -> list[RefinementExpertConfig]:
     """精修规划阶段: 分析需求并分配专家.
 
@@ -70,21 +77,26 @@ async def plan(
     Returns:
         RefinementExpertConfig 列表, 每个专家已注入所有专家角色信息.
     """
-    sys_section = (
-        f"\n用户的重要指示：{user_system_prompt}" if user_system_prompt else ""
-    )
-    text_prompt = f'Context:\n{context}{sys_section}\n\nCurrent Query: "{query}"'
+    text_prompt = f'Context:\n{context}\n\nCurrent Query: "{query}"'
+    expert_model_note = ""
+    if enable_expert_model_selection:
+        expert_model_note = format_expert_model_pool_note(expert_model_pool)
     contents = build_prefill_contents(
         text_prompt,
         image_parts=image_parts,
-        leading_instruction=REFINEMENT_PLANNER_PROMPT,
+        leading_instruction="\n\n".join(
+            part
+            for part in [REFINEMENT_PLANNER_PROMPT, expert_model_note]
+            if part
+        ),
     )
+    debug_info: dict[str, Any] = {}
 
     try:
         result = await generate_json(
             model=model,
             contents=contents,
-            system_instruction="",
+            system_instruction=user_system_prompt or None,
             response_schema=REFINEMENT_PLANNING_SCHEMA,
             thinking_budget=budget,
             temperature=temperature,
@@ -92,6 +104,7 @@ async def plan(
             image_parts=None,
             provider=provider,
             json_via_prompt=json_via_prompt,
+            debug_info=debug_info,
         )
         logger.debug(
             "[RefinementPlanner] raw response:\n%s",
@@ -113,6 +126,7 @@ async def plan(
                 domain=e.get("domain", ""),
                 prompt=e.get("prompt", ""),
                 temperature=e.get("temperature", 1.0),
+                expert_model=str(e.get("expert_model", "")).strip(),
                 all_expert_roles=all_roles,
             )
             experts.append(cfg)
@@ -126,4 +140,22 @@ async def plan(
 
     except Exception as e:
         logger.error("[RefinementPlanner] planning failed: %s", e)
+        raw_text = str(debug_info.get("raw_text", "") or "")
+        cleaned_text = str(debug_info.get("cleaned_text", "") or "")
+        if raw_text or cleaned_text:
+            logger.error(
+                "[RefinementPlanner] planning parse debug: provider=%s model=%s raw_len=%d cleaned_len=%d",
+                debug_info.get("provider", provider),
+                debug_info.get("model", model),
+                len(raw_text),
+                len(cleaned_text),
+            )
+            logger.error(
+                "[RefinementPlanner] planning parse raw response:\n%s",
+                raw_text,
+            )
+            logger.error(
+                "[RefinementPlanner] planning parse cleaned response:\n%s",
+                cleaned_text,
+            )
         return []

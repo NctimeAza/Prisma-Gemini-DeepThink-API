@@ -20,6 +20,8 @@ from config import (
     MAX_CONTEXT_MESSAGES,
     SSE_HEARTBEAT_INTERVAL,
     StageProviders,
+    resolve_expert_routing_config,
+    resolve_no_cliches_config,
     resolve_model,
     split_forced_model_suffix,
 )
@@ -109,19 +111,36 @@ def _resolve_request(
 
     # 精修流程额外配置
     refinement_kwargs: dict = {}
+    expert_routing_cfg = resolve_expert_routing_config(base_model_id)
+    no_cliches_cfg = resolve_no_cliches_config(
+        base_model_id, real_model, stage_providers,
+    )
     if mode == "refinement":
         from config import resolve_refinement_config
         ref_cfg = resolve_refinement_config(
-            base_model_id, real_model, mgr_model, syn_model,
+            base_model_id, real_model, mgr_model, syn_model, stage_providers,
         )
         refinement_kwargs = {
             "refinement_max_rounds": ref_cfg.refinement_max_rounds,
             "pre_draft_review_rounds": ref_cfg.pre_draft_review_rounds,
             "enable_json_repair": ref_cfg.enable_json_repair,
             "enable_text_cleaner": ref_cfg.enable_text_cleaner,
+            "refinement_planner_model": ref_cfg.refinement_planner_model,
+            "refinement_planner_provider": ref_cfg.refinement_planner_provider,
+            "pre_draft_expert_model": ref_cfg.pre_draft_expert_model,
+            "pre_draft_expert_provider": ref_cfg.pre_draft_expert_provider,
+            "pre_draft_review_model": ref_cfg.pre_draft_review_model,
+            "pre_draft_review_provider": ref_cfg.pre_draft_review_provider,
             "draft_model": ref_cfg.draft_model,
+            "draft_provider": ref_cfg.draft_provider,
             "review_model": ref_cfg.review_model,
+            "review_provider": ref_cfg.review_provider,
+            "improver_model": ref_cfg.improver_model,
+            "improver_provider": ref_cfg.improver_provider,
             "merge_model": ref_cfg.merge_model,
+            "merge_provider": ref_cfg.merge_provider,
+            "text_cleaner_model": ref_cfg.text_cleaner_model,
+            "text_cleaner_provider": ref_cfg.text_cleaner_provider,
             "json_repair_model": ref_cfg.json_repair_model,
         }
 
@@ -139,6 +158,16 @@ def _resolve_request(
         synthesis_temperature=synthesis_temp,
         json_via_prompt=json_via_prompt,
         forced_prefill_suffix=forced_prefill_suffix,
+        expert_model_pool=expert_routing_cfg.expert_model_pool,
+        enable_manager_expert_model_selection=(
+            expert_routing_cfg.enable_manager_expert_model_selection
+        ),
+        enable_review_expert_model_selection=(
+            expert_routing_cfg.enable_review_expert_model_selection
+        ),
+        enable_no_cliches=no_cliches_cfg.enable_no_cliches,
+        no_cliches_model=no_cliches_cfg.no_cliches_model,
+        no_cliches_provider=no_cliches_cfg.no_cliches_provider,
         **refinement_kwargs,
     )
     return real_model, mgr_model, syn_model, config, provider, stage_providers
@@ -324,6 +353,8 @@ async def _generate_sse_stream(
         )
 
         if resume_mode:
+            for status_part in _iter_chunks(checkpoint.status_content):
+                yield _new_reasoning_chunk(completion_id, request.model, status_part)
             for thought_part in _iter_chunks(checkpoint.reasoning_content):
                 yield _new_reasoning_chunk(completion_id, request.model, thought_part)
 
@@ -544,6 +575,7 @@ async def chat_completions(raw_request: Request):
         checkpoint.phase = "planning"
         checkpoint.status = "running"
         checkpoint.current_round = 1
+        checkpoint.status_content = ""
         checkpoint.reasoning_content = ""
         checkpoint.output_content = ""
         checkpoint.error_message = ""
@@ -597,9 +629,10 @@ async def chat_completions(raw_request: Request):
     try:
         resume_hint = _resume_hint(checkpoint.resume_id)
         full_content = checkpoint.output_content if continue_mode else ""
-        full_reasoning = resume_hint + (
-            checkpoint.reasoning_content if continue_mode else ""
-        )
+        full_reasoning = resume_hint
+        if continue_mode:
+            full_reasoning += checkpoint.status_content
+            full_reasoning += checkpoint.reasoning_content
         all_grounding_ns: list[dict] = []
 
         if not replay_only:

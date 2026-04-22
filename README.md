@@ -21,12 +21,12 @@ REQ -> [Manager规划] -> [Expert并行执行] -> [Manager审查] <-> [迭代] -
 - Manager审查阶段：评估专家输出，对每个专家做出keep（一般是满意了）/iterate（需要改进）/delete（回复质量太低且毫无改进空间，踢出上下文）决策。未通过则分配新一轮专家继续迭代，直至满意或达到`max_rounds`上限。
 - Synthesis综合阶段：汇总全部轮次专家结果，流式输出最终回答。
 
-所有LLM调用经统一Provider抽象层路由，支持Gemini原生协议与OpenAI兼容协议两种上游。每个阶段有独立的thinking budget（由虚拟模型配置中的`planning_level`/`expert_level`/`synthesis_level`控制，似乎对OAI模型不兼容），温度亦可按阶段锁定，避免有些提供商的模型只支持特定温度。
+所有LLM调用经统一Provider抽象层路由，支持Gemini原生协议、OpenAI兼容`chat.completions`，以及OpenAI官方`Responses API`三种上游。每个阶段有独立的thinking budget（由虚拟模型配置中的`planning_level`/`expert_level`/`synthesis_level`控制，似乎对OAI模型不兼容），温度亦可按阶段锁定，避免有些提供商的模型只支持特定温度。
 
 ## 一次DeepThink流程
 
 1. 下游POST `/v1/chat/completions`，携带虚拟模型名（例如`gemini-3.1-pro-deepthink-high`）。
-2. 路由层通过`resolve_model`将虚拟模型解析为：实际模型、Manager/Synthesis专用模型、各阶段thinking level、max_rounds、provider、各阶段温度覆盖。生成`DeepThinkConfig`交给编排器。
+2. 路由层通过`resolve_model`将虚拟模型解析为：实际模型、Manager/Synthesis专用模型、各阶段thinking level、max_rounds、provider、阶段级provider、各阶段温度覆盖。生成`DeepThinkConfig`交给编排器。
 3. Manager规划阶段：Manager调用LLM，返回`AnalysisResult`（结构化JSON），内含专家配置列表。若返回空列表则注入兜底专家。
 4. Expert并行执行阶段：按配置构建`ExpertResult`列表，`asyncio.gather`并发执行。每个专家独立拿到对话上下文+自己的任务prompt+图片（如有），非流式调用LLM。执行结果（content/thoughts/status）回写到ExpertResult。
 5. Review Loop：若`enable_recursive_loop=true`且`round < max_rounds`：Manager拿到全部专家输出进行审查，对每个专家输出做action决策：
@@ -58,15 +58,25 @@ py main.py
 
 ### 虚拟模型
 
-内置`gemini-3.1-pro-deepthink-{minimal,low,medium,high,extra}`五档预设。通过`VIRTUAL_MODELS_FILE`指向JSON文件可新增或覆盖默认模型。每个虚拟模型可独立指定：实际模型、Manager/Synthesis专用模型、provider，以及更细粒度的 `manager_provider` / `expert_provider` / `synthesis_provider`，各阶段thinking level与温度覆盖、max_rounds。格式详见`.env.example`。
+内置`gemini-3.1-pro-deepthink-{minimal,low,medium,high,extra}`五档预设，另新增`gpt-5.4-deepthink-minimal`混合预设。通过`VIRTUAL_MODELS_FILE`指向JSON文件可新增或覆盖默认模型。每个虚拟模型可独立指定：实际模型、Manager/Synthesis专用模型、provider，以及更细粒度的 `manager_provider` / `expert_provider` / `synthesis_provider`，各阶段thinking level与温度覆盖、max_rounds。格式详见`.env.example`。
+
+`gpt-5.4-deepthink-minimal`的路由策略如下：
+- Manager/Review：`gemini-3.1-pro-preview` + `gemini`
+- Expert/Synthesis：`gpt-5.4` + `openai_responses`
 
 ### 多Provider
 
 通过环境变量注册自定义provider：`PROVIDER_<NAME>_API_KEY` + `PROVIDER_<NAME>_BASE_URL`，然后在虚拟模型配置中引用`"provider": "<name>"`即可。
 
+另外支持请求时直通写法：`provider/model`。例如：
+- `openai_responses/gpt-5.4`
+- `deepseek/deepseek-chat`
+
+`openai_responses`是新的内置provider，底层走OpenAI官方`Responses API`，并默认全阶段开启`web_search`。
+
 ### 注意
 
-- OAI兼容接口不支持搜索：GoogleSearch工具（硬编码开启的）仅Gemini原生协议可用。非Gemini provider下无联网检索能力。
+- `openai_responses`支持联网搜索：底层走OpenAI官方`Responses API`，默认全阶段开启`web_search`。普通`openai`及其他OpenAI兼容provider仍然不带内置搜索。
 - 非Gemini模型的兼容性问题：项目依赖模型具备较强的JSON结构化输出能力（Manager规划/审查阶段需要严格JSON）。实测DS官API不支持`response_format`，直接400不可用；Kimi K2.5官API不用温度1会报400，且有时JSON遵循性差。
 - Thinking Budget对非Gemini模型无效：`thinkingConfig`参数会被静默忽略，实际效果取决于模型自身。
 

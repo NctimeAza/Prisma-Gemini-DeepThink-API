@@ -60,7 +60,9 @@ async def stream_synthesis(
         kwargs["temperature"] = temperature
 
     async for text_chunk, thought_chunk, grounding_chunks in generate_content_stream(
-        **kwargs, provider=provider,
+        **kwargs,
+        system_instruction=user_system_prompt or None,
+        provider=provider,
     ):
         yield text_chunk, thought_chunk, grounding_chunks
 

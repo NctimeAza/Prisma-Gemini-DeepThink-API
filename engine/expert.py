@@ -70,6 +70,7 @@ async def run_expert(
             full_content, full_thoughts, _grounding = await generate_content(
                 model=model,
                 contents=contents,
+                system_instruction=user_system_prompt or None,
                 temperature=expert.temperature,
                 top_p=top_p,
                 thinking_budget=budget,

@@ -8,8 +8,15 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, AsyncGenerator, Optional
 
-from config import LLM_PROVIDER, SSE_HEARTBEAT_INTERVAL, StageProviders, get_thinking_budget
+from config import (
+    LLM_PROVIDER,
+    SSE_HEARTBEAT_INTERVAL,
+    StageProviders,
+    get_thinking_budget,
+    resolve_expert_model_selection,
+)
 from engine import expert, manager, synthesis
+from engine.refinement import no_cliches
 from models import (
     AnalysisResult,
     DeepThinkCheckpoint,
@@ -24,6 +31,9 @@ from prompts import (
     MSG_EXPERT_ERROR,
     MSG_EXPERT_START,
     MSG_EXPERTS_ASSIGNED,
+    MSG_NO_CLICHES_EXPERT_DONE,
+    MSG_NO_CLICHES_EXPERT_ERROR,
+    MSG_NO_CLICHES_EXPERT_START,
     MSG_NEXT_ROUND,
     MSG_PIPELINE_START,
     MSG_PREPARING,
@@ -119,9 +129,20 @@ def _build_round_experts(
     query: str,
     expert_configs: list[ExpertConfig],
     round_no: int,
+    default_model: str,
+    default_provider: str,
+    expert_model_pool: list | None = None,
 ) -> list[ExpertResult]:
     experts: list[ExpertResult] = []
     for idx, exp_config in enumerate(expert_configs):
+        expert_model, execution_model, execution_provider = (
+            resolve_expert_model_selection(
+                exp_config.expert_model,
+                default_model,
+                default_provider,
+                expert_model_pool,
+            )
+        )
         experts.append(
             ExpertResult(
                 id=f"expert-r{round_no}-{idx + 1}",
@@ -131,6 +152,9 @@ def _build_round_experts(
                 prompt=format_expert_task(query, exp_config.prompt),
                 status="pending",
                 round=round_no,
+                expert_model=expert_model,
+                execution_model=execution_model,
+                execution_provider=execution_provider,
             )
         )
     return experts
@@ -336,6 +360,9 @@ async def _pipeline(
     manager_provider = stage_providers.manager
     expert_provider = stage_providers.expert
     synthesis_provider = stage_providers.synthesis
+    no_cliches_enabled = config.enable_no_cliches
+    no_cliches_model = config.no_cliches_model or "gemini-3.1-pro-preview"
+    no_cliches_provider = config.no_cliches_provider or "gemini"
 
     # --- 精修模式分发 ---
     if config.mode == "refinement":
@@ -387,7 +414,7 @@ async def _pipeline(
         await _sync_checkpoint("phase", {"phase": phase})
 
     async def _emit_text_notice(text: str) -> None:
-        await queue.put(("", f"{text}\n", "synthesis", []))
+        await queue.put(("", f"{text}\n", "status", []))
 
     async def _run_experts(experts_to_run: list[ExpertResult], context: str, budget: int) -> None:
         if not experts_to_run:
@@ -407,7 +434,7 @@ async def _pipeline(
             )
 
             result = await expert.run_expert(
-                model,
+                exp.execution_model or model,
                 exp,
                 context,
                 budget,
@@ -420,8 +447,53 @@ async def _pipeline(
                 ),
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=expert_provider,
+                provider=exp.execution_provider or expert_provider,
             )
+
+            if (
+                no_cliches_enabled
+                and result.status == "completed"
+                and (result.content or "").strip()
+            ):
+                await _emit_text_notice(
+                    MSG_NO_CLICHES_EXPERT_START.format(expert_name=result.role)
+                )
+                try:
+                    _analysis, ops, cleaned_text = await no_cliches.run_no_cliches(
+                        model=no_cliches_model,
+                        text=result.content,
+                        budget=budget,
+                        provider=no_cliches_provider,
+                        temperature=(
+                            config.expert_temperature
+                            if config.expert_temperature is not None
+                            else 0.2
+                        ),
+                        top_p=top_p,
+                        json_via_prompt=config.json_via_prompt,
+                        expert_role="NoCliches",
+                    )
+                    result.content = cleaned_text
+                    removed = sum(1 for op in ops if op.action == "remove")
+                    modified = sum(1 for op in ops if op.action == "modify")
+                    await _emit_text_notice(
+                        MSG_NO_CLICHES_EXPERT_DONE.format(
+                            expert_name=result.role,
+                            removed=removed,
+                            modified=modified,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[Orchestrator] no-clichés failed for expert %s: %s",
+                        result.role,
+                        exc,
+                    )
+                    await _emit_text_notice(
+                        MSG_NO_CLICHES_EXPERT_ERROR.format(
+                            expert_name=result.role
+                        )
+                    )
 
             if result.status == "completed":
                 await _emit_text_notice(MSG_EXPERT_DONE.format(expert_name=result.role))
@@ -499,6 +571,10 @@ async def _pipeline(
                     image_parts=image_parts,
                     provider=manager_provider,
                     json_via_prompt=config.json_via_prompt,
+                    expert_model_pool=config.expert_model_pool,
+                    enable_expert_model_selection=(
+                        config.enable_manager_expert_model_selection
+                    ),
                 )
             )
             analysis = await manager_task
@@ -506,7 +582,14 @@ async def _pipeline(
             await _sync_checkpoint("manager_completed")
 
             round_counter = 1
-            all_experts = _build_round_experts(query, analysis.experts, round_counter)
+            all_experts = _build_round_experts(
+                query,
+                analysis.experts,
+                round_counter,
+                model,
+                expert_provider,
+                config.expert_model_pool,
+            )
             await _set_phase("experts")
 
             await _emit_text_notice(
@@ -520,7 +603,14 @@ async def _pipeline(
         elif analysis and not all_experts:
             logger.info("[Orchestrator] rebuilding experts from stored analysis")
             round_counter = 1
-            all_experts = _build_round_experts(query, analysis.experts, round_counter)
+            all_experts = _build_round_experts(
+                query,
+                analysis.experts,
+                round_counter,
+                model,
+                expert_provider,
+                config.expert_model_pool,
+            )
             await _set_phase("experts")
             await _sync_checkpoint("round_assigned", {"round": round_counter})
         elif all_experts:
@@ -570,6 +660,10 @@ async def _pipeline(
                             previous_reviews=all_reviews,
                             provider=manager_provider,
                             json_via_prompt=config.json_via_prompt,
+                            expert_model_pool=config.expert_model_pool,
+                            enable_expert_model_selection=(
+                                config.enable_review_expert_model_selection
+                            ),
                         )
                     )
                     review_result = await review_task
@@ -623,6 +717,9 @@ async def _pipeline(
                         query,
                         next_round_configs,
                         round_counter,
+                        model,
+                        expert_provider,
+                        config.expert_model_pool,
                     )
                     if not next_round_experts:
                         await _emit_text_notice(MSG_REVIEW_NO_EXPERTS)
@@ -785,7 +882,10 @@ async def run_deep_think(
         if text_chunk and not is_fallback_error_chunk:
             resume_checkpoint.output_content += text_chunk
         if thought_chunk:
-            resume_checkpoint.reasoning_content += thought_chunk
+            if phase == "status":
+                resume_checkpoint.status_content += thought_chunk
+            else:
+                resume_checkpoint.reasoning_content += thought_chunk
         resume_checkpoint.updated_at = _now_ts()
         await _emit_event(
             event_callback,

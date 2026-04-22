@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+import clients.openai_client as _chat_client
 from config import (
     LLM_NETWORK_RETRIES,
     LLM_PROVIDER,
@@ -19,11 +20,21 @@ from config import (
     REFINEMENT_EXPERT_REQUEST_DEBUG_MAX_CHARS,
     StageProviders,
     get_thinking_budget,
+    resolve_expert_model_selection,
 )
 from clients.llm_client import generate_content
 from engine import manager
 from engine.orchestrator import _apply_review_actions
-from engine.refinement import applier, cleaner, draft, improver, merger, planner, reviewer
+from engine.refinement import (
+    applier,
+    cleaner,
+    draft,
+    improver,
+    merger,
+    no_cliches,
+    planner,
+    reviewer,
+)
 from models import (
     DeepThinkCheckpoint,
     DeepThinkConfig,
@@ -36,6 +47,12 @@ from models import (
 )
 from prompts import (
     MSG_PIPELINE_START,
+    MSG_NO_CLICHES_DRAFT_DONE,
+    MSG_NO_CLICHES_DRAFT_ERROR,
+    MSG_NO_CLICHES_DRAFT_START,
+    MSG_NO_CLICHES_EXPERT_DONE,
+    MSG_NO_CLICHES_EXPERT_ERROR,
+    MSG_NO_CLICHES_EXPERT_START,
     MSG_REFINEMENT_APPLIED,
     MSG_REFINEMENT_CLEAN_DONE,
     MSG_REFINEMENT_CLEAN_ERROR,
@@ -144,7 +161,7 @@ def _dump_refinement_expert_request_debug(
             "user_system_prompt": user_system_prompt,
             "expert_config": expert_cfg.model_dump(mode="json"),
             "request": {
-                "system_instruction": "",
+                "system_instruction": user_system_prompt,
                 "leading_instruction": leading_instruction,
                 "contents": contents,
             },
@@ -189,6 +206,9 @@ def _to_refinement_configs(expert_configs: list[ExpertConfig]) -> list[Refinemen
             domain=cfg.description or cfg.role,
             prompt=cfg.prompt,
             temperature=cfg.temperature,
+            expert_model=cfg.expert_model,
+            execution_model=cfg.execution_model,
+            execution_provider=cfg.execution_provider,
             all_expert_roles=all_roles,
         )
         for cfg in expert_configs
@@ -210,6 +230,9 @@ def _outputs_to_expert_results(
             status="completed",
             content=item.get("content", ""),
             round=round_no,
+            expert_model=item.get("expert_model", ""),
+            execution_model=item.get("execution_model", ""),
+            execution_provider=item.get("execution_provider", ""),
         )
         for idx, item in enumerate(outputs, start=1)
     ]
@@ -305,6 +328,7 @@ async def _run_single_expert(
             full_content, _, _ = await generate_content(
                 model=model,
                 contents=contents,
+                system_instruction=user_system_prompt or None,
                 temperature=temperature,
                 top_p=top_p,
                 thinking_budget=budget,
@@ -318,11 +342,12 @@ async def _run_single_expert(
                 if lines and lines[-1].strip() == "```":
                     lines = lines[:-1]
                 text = "\n".join(lines).strip()
+            cleaned_text = _chat_client._clean_json_string(text)  # noqa: SLF001
 
             parsed: dict | None = None
-            if text:
+            if cleaned_text:
                 try:
-                    candidate = json.loads(text)
+                    candidate = json.loads(cleaned_text)
                     if isinstance(candidate, dict):
                         parsed = candidate
                 except json.JSONDecodeError:
@@ -344,7 +369,7 @@ async def _run_single_expert(
                     str(parsed.get("text", "")).strip()
                     or str(parsed.get("output", "")).strip()
                     or str(parsed.get("answer", "")).strip()
-                    or text
+                    or cleaned_text
                 )
                 return {
                     "role": expert_cfg.role,
@@ -437,12 +462,32 @@ async def run_refinement_pipeline(
     synthesis_provider = stage_providers.synthesis
 
     async def _emit(text: str) -> None:
-        await queue.put(("", f"{text}\n", "refinement", []))
+        # 运行时状态提示应与经典 DeepThink 管线保持同一 phase，
+        # 这样 Gemini 原生路由会始终透传，checkpoint 也会写入 status_content。
+        await queue.put(("", f"{text}\n", "status", []))
 
     def _set_refinement_phase(phase: str) -> None:
         if resume_checkpoint:
             resume_checkpoint.refinement_phase = phase
             resume_checkpoint.updated_at = _now_ts()
+
+    def _resolve_runtime_expert_backend(
+        expert_cfg: RefinementExpertConfig,
+        default_model: str,
+        default_provider: str,
+    ) -> tuple[str, str, str]:
+        selected_expert_model, resolved_model, resolved_provider = (
+            resolve_expert_model_selection(
+                expert_cfg.expert_model,
+                default_model,
+                default_provider,
+                config.expert_model_pool,
+            )
+        )
+        expert_cfg.expert_model = selected_expert_model
+        expert_cfg.execution_model = resolved_model
+        expert_cfg.execution_provider = resolved_provider
+        return selected_expert_model, resolved_model, resolved_provider
 
     async def _run_expert_batch(
         expert_cfgs: list[RefinementExpertConfig],
@@ -459,8 +504,15 @@ async def run_refinement_pipeline(
             )
 
         async def _run_one(expert_cfg: RefinementExpertConfig) -> dict[str, str]:
+            selected_expert_model, resolved_model, resolved_provider = (
+                _resolve_runtime_expert_backend(
+                    expert_cfg,
+                    pre_draft_expert_model,
+                    pre_draft_expert_provider,
+                )
+            )
             output = await _run_single_expert(
-                model=model,
+                model=resolved_model,
                 expert_cfg=expert_cfg,
                 query=query,
                 context=recent_history,
@@ -468,9 +520,54 @@ async def run_refinement_pipeline(
                 top_p=top_p,
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=expert_provider,
+                provider=resolved_provider,
                 forced_temperature=config.expert_temperature,
             )
+            output["expert_model"] = selected_expert_model
+            output["execution_model"] = resolved_model
+            output["execution_provider"] = resolved_provider
+            if no_cliches_enabled and (output.get("content", "") or "").strip():
+                await _emit(
+                    MSG_NO_CLICHES_EXPERT_START.format(
+                        expert_name=output["role"]
+                    )
+                )
+                try:
+                    _analysis, ops, cleaned_text = await no_cliches.run_no_cliches(
+                        model=no_cliches_model,
+                        text=output["content"],
+                        budget=expert_budget,
+                        provider=no_cliches_provider,
+                        temperature=(
+                            config.expert_temperature
+                            if config.expert_temperature is not None
+                            else 0.2
+                        ),
+                        top_p=top_p,
+                        json_via_prompt=config.json_via_prompt,
+                        expert_role="NoCliches",
+                    )
+                    output["content"] = cleaned_text
+                    removed = sum(1 for op in ops if op.action == "remove")
+                    modified = sum(1 for op in ops if op.action == "modify")
+                    await _emit(
+                        MSG_NO_CLICHES_EXPERT_DONE.format(
+                            expert_name=output["role"],
+                            removed=removed,
+                            modified=modified,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[RefinementPipeline] no-clichés failed for expert %s: %s",
+                        output["role"],
+                        exc,
+                    )
+                    await _emit(
+                        MSG_NO_CLICHES_EXPERT_ERROR.format(
+                            expert_name=output["role"]
+                        )
+                    )
             await _emit(MSG_REFINEMENT_EXPERT_DONE.format(expert_name=output["role"]))
             if output["content"]:
                 await queue.put(
@@ -484,9 +581,31 @@ async def run_refinement_pipeline(
     expert_budget = get_thinking_budget(config.expert_level, model)
     synthesis_budget = get_thinking_budget(config.synthesis_level, model)
 
+    refinement_planner_model = config.refinement_planner_model or mgr_model
+    refinement_planner_provider = (
+        config.refinement_planner_provider or manager_provider
+    )
+    pre_draft_expert_model = config.pre_draft_expert_model or model
+    pre_draft_expert_provider = (
+        config.pre_draft_expert_provider or expert_provider
+    )
+    pre_draft_review_model = config.pre_draft_review_model or mgr_model
+    pre_draft_review_provider = (
+        config.pre_draft_review_provider or manager_provider
+    )
     draft_model = config.draft_model or model
+    draft_provider = config.draft_provider or expert_provider
     review_model = config.review_model or mgr_model
+    review_provider = config.review_provider or manager_provider
+    improver_model = config.improver_model or model
+    improver_provider = config.improver_provider or expert_provider
     merge_model = config.merge_model or syn_model
+    merge_provider = config.merge_provider or synthesis_provider
+    text_cleaner_model = config.text_cleaner_model or merge_model
+    text_cleaner_provider = config.text_cleaner_provider or merge_provider
+    no_cliches_enabled = config.enable_no_cliches
+    no_cliches_model = config.no_cliches_model or "gemini-3.1-pro-preview"
+    no_cliches_provider = config.no_cliches_provider or "gemini"
     json_repair_model = config.json_repair_model or "gemini-3-flash-preview"
     max_refinement_rounds = config.refinement_max_rounds
     pre_draft_review_rounds = max(0, config.pre_draft_review_rounds)
@@ -496,6 +615,31 @@ async def run_refinement_pipeline(
     recent_history = "\n".join(
         f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
         for m in history[-max_ctx:]
+    )
+
+    logger.info(
+        "[RefinementPipeline] stage routing: "
+        "planner=%s@%s | pre_draft_expert=%s@%s | pre_draft_review=%s@%s | "
+        "draft=%s@%s | review=%s@%s | improver=%s@%s | merge=%s@%s | cleaner=%s@%s | "
+        "no_cliches=%s@%s",
+        refinement_planner_model,
+        refinement_planner_provider,
+        pre_draft_expert_model,
+        pre_draft_expert_provider,
+        pre_draft_review_model,
+        pre_draft_review_provider,
+        draft_model,
+        draft_provider,
+        review_model,
+        review_provider,
+        improver_model,
+        improver_provider,
+        merge_model,
+        merge_provider,
+        text_cleaner_model,
+        text_cleaner_provider,
+        no_cliches_model,
+        no_cliches_provider,
     )
 
     start_phase = "planning"
@@ -528,10 +672,12 @@ async def run_refinement_pipeline(
         "experts",
         "pre_draft_review",
         "draft",
+        "pre_draft_no_cliches",
         "review",
         "improvers",
         "merge",
         "apply",
+        "no_cliches",
         "cleanup",
         "output",
     ]
@@ -561,10 +707,61 @@ async def run_refinement_pipeline(
             top_p=top_p,
             user_system_prompt=system_prompt,
             image_parts=image_parts,
-            provider=manager_provider,
+            provider=review_provider,
             enable_json_repair=enable_json_repair,
             json_repair_model=json_repair_model,
+            expert_model_pool=config.expert_model_pool,
+            enable_expert_model_selection=(
+                config.enable_review_expert_model_selection
+            ),
         )
+
+    async def _run_draft_no_cliches(
+        *,
+        stage_text: str,
+        phase_name: str,
+    ) -> None:
+        nonlocal draft_text
+        if not no_cliches_enabled or not (draft_text or "").strip():
+            return
+
+        _set_refinement_phase(phase_name)
+        await _emit(MSG_NO_CLICHES_DRAFT_START.format(stage=stage_text))
+        try:
+            _analysis, ops, cleaned_text = await no_cliches.run_no_cliches(
+                model=no_cliches_model,
+                text=draft_text,
+                budget=synthesis_budget,
+                provider=no_cliches_provider,
+                temperature=(
+                    config.expert_temperature
+                    if config.expert_temperature is not None
+                    else 0.2
+                ),
+                top_p=top_p,
+                json_via_prompt=config.json_via_prompt,
+                expert_role="NoCliches",
+            )
+            draft_text = cleaned_text
+            removed = sum(1 for op in ops if op.action == "remove")
+            modified = sum(1 for op in ops if op.action == "modify")
+            await _emit(
+                MSG_NO_CLICHES_DRAFT_DONE.format(
+                    stage=stage_text,
+                    removed=removed,
+                    modified=modified,
+                )
+            )
+            if resume_checkpoint:
+                resume_checkpoint.draft_content = draft_text
+                resume_checkpoint.updated_at = _now_ts()
+        except Exception as exc:
+            logger.warning(
+                "[RefinementPipeline] no-clichés draft cleanup failed (%s): %s",
+                stage_text,
+                exc,
+            )
+            await _emit(MSG_NO_CLICHES_DRAFT_ERROR.format(stage=stage_text))
 
     try:
         if not _should_skip("planning"):
@@ -576,7 +773,7 @@ async def run_refinement_pipeline(
             await _emit(MSG_REFINEMENT_PLANNING)
 
             expert_configs = await planner.plan(
-                model=mgr_model,
+                model=refinement_planner_model,
                 query=query,
                 context=recent_history,
                 budget=planning_budget,
@@ -588,8 +785,12 @@ async def run_refinement_pipeline(
                 top_p=top_p,
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=manager_provider,
+                provider=refinement_planner_provider,
                 json_via_prompt=config.json_via_prompt,
+                expert_model_pool=config.expert_model_pool,
+                enable_expert_model_selection=(
+                    config.enable_manager_expert_model_selection
+                ),
             )
 
             if not expert_configs:
@@ -658,7 +859,7 @@ async def run_refinement_pipeline(
                 )
 
                 pre_review = await manager.review(
-                    model=mgr_model,
+                    model=pre_draft_review_model,
                     query=query,
                     current_experts=pre_draft_experts,
                     budget=planning_budget,
@@ -673,8 +874,12 @@ async def run_refinement_pipeline(
                     image_parts=image_parts,
                     remaining_rounds=max(pre_draft_review_rounds - pre_draft_round, 0),
                     previous_reviews=pre_draft_reviews,
-                    provider=manager_provider,
+                    provider=pre_draft_review_provider,
                     json_via_prompt=config.json_via_prompt,
+                    expert_model_pool=config.expert_model_pool,
+                    enable_expert_model_selection=(
+                        config.enable_review_expert_model_selection
+                    ),
                 )
                 pre_review.round = pre_draft_round
                 _upsert_review(pre_draft_reviews, pre_review)
@@ -778,7 +983,7 @@ async def run_refinement_pipeline(
                 top_p=top_p,
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=expert_provider,
+                provider=draft_provider,
             )
 
             await _emit(MSG_REFINEMENT_DRAFT_DONE)
@@ -787,6 +992,12 @@ async def run_refinement_pipeline(
             if resume_checkpoint:
                 resume_checkpoint.draft_content = draft_text
                 resume_checkpoint.updated_at = _now_ts()
+
+        if no_cliches_enabled and not _should_skip("pre_draft_no_cliches"):
+            await _run_draft_no_cliches(
+                stage_text="初稿首轮审查前",
+                phase_name="pre_draft_no_cliches",
+            )
 
         global_op_id_counter = 0
 
@@ -798,39 +1009,58 @@ async def run_refinement_pipeline(
             review_analysis = None
             all_operations: list[DiffOperation] = []
             merge_result = None
+            skip_editing_round = False
 
             if not (_should_skip("review") and refinement_round == start_round):
                 _set_refinement_phase("review")
                 await _emit(MSG_REFINEMENT_REVIEW_START.format(round=refinement_round))
                 review_analysis = await _run_draft_review(refinement_round)
 
-                if review_analysis.approved and refinement_round >= 2:
+                if review_analysis.approved:
                     await _emit(MSG_REFINEMENT_REVIEW_APPROVED)
-                    break
+                    if no_cliches_enabled:
+                        skip_editing_round = True
+                    elif refinement_round >= 2:
+                        break
 
                 if not review_analysis.refinement_experts:
-                    await _emit(MSG_REFINEMENT_REVIEW_APPROVED)
-                    break
+                    if not review_analysis.approved:
+                        await _emit(MSG_REFINEMENT_REVIEW_APPROVED)
+                    if no_cliches_enabled:
+                        skip_editing_round = True
+                    else:
+                        break
 
                 if review_analysis.issues:
                     issues_text = "\n".join(f"- {issue}" for issue in review_analysis.issues)
                     await _emit(f"Review issues:\n{issues_text}")
 
-            if not (_should_skip("improvers") and refinement_round == start_round):
+            if (
+                not skip_editing_round
+                and not (_should_skip("improvers") and refinement_round == start_round)
+            ):
                 _set_refinement_phase("improvers")
 
                 if review_analysis is None:
                     review_analysis = await _run_draft_review(refinement_round)
                     if review_analysis.approved and not review_analysis.refinement_experts:
                         await _emit(MSG_REFINEMENT_REVIEW_APPROVED)
-                        break
+                        if no_cliches_enabled:
+                            skip_editing_round = True
+                        else:
+                            break
+                    if review_analysis.approved and no_cliches_enabled:
+                        skip_editing_round = True
 
-                draft_lines_json = json.dumps(
-                    reviewer.split_draft_to_lines(draft_text),
-                    ensure_ascii=False,
-                )
+                if skip_editing_round:
+                    improver_configs = []
+                else:
+                    draft_lines_json = json.dumps(
+                        reviewer.split_draft_to_lines(draft_text),
+                        ensure_ascii=False,
+                    )
 
-                improver_configs = review_analysis.refinement_experts
+                    improver_configs = review_analysis.refinement_experts
                 await _emit(
                     f"Assigned {len(improver_configs)} improvement experts: "
                     f"{', '.join(e.role for e in improver_configs)}"
@@ -844,23 +1074,31 @@ async def run_refinement_pipeline(
                         )
                     )
 
-                improver_tasks = [
-                    improver.run_improver(
-                        model=model,
-                        expert_config=cfg,
-                        context=recent_history,
-                        draft_lines_json=draft_lines_json,
-                        budget=expert_budget,
-                        top_p=top_p,
-                        guidance=review_analysis.expert_guidance.get(cfg.role, ""),
-                        user_system_prompt=system_prompt,
-                        image_parts=image_parts,
-                        provider=expert_provider,
-                        enable_json_repair=enable_json_repair,
-                        json_repair_model=json_repair_model,
+                improver_tasks = []
+                for cfg in improver_configs:
+                    _resolve_runtime_expert_backend(
+                        cfg,
+                        improver_model,
+                        improver_provider,
                     )
-                    for cfg in improver_configs
-                ]
+                    improver_tasks.append(
+                        improver.run_improver(
+                            model=cfg.execution_model,
+                            expert_config=cfg,
+                            context=recent_history,
+                            draft_lines_json=draft_lines_json,
+                            budget=expert_budget,
+                            top_p=top_p,
+                            guidance=review_analysis.expert_guidance.get(
+                                cfg.role, ""
+                            ),
+                            user_system_prompt=system_prompt,
+                            image_parts=image_parts,
+                            provider=cfg.execution_provider,
+                            enable_json_repair=enable_json_repair,
+                            json_repair_model=json_repair_model,
+                        )
+                    )
                 improver_results = await asyncio.gather(*improver_tasks)
 
                 for result in improver_results:
@@ -898,9 +1136,15 @@ async def run_refinement_pipeline(
 
                 if not all_operations:
                     await _emit("No improvement operations returned. Skipping merge.")
-                    break
+                    if no_cliches_enabled:
+                        skip_editing_round = True
+                    else:
+                        break
 
-            if not (_should_skip("merge") and refinement_round == start_round):
+            if (
+                not skip_editing_round
+                and not (_should_skip("merge") and refinement_round == start_round)
+            ):
                 _set_refinement_phase("merge")
                 await _emit(MSG_REFINEMENT_MERGE_START)
 
@@ -915,7 +1159,7 @@ async def run_refinement_pipeline(
                         else 0.5
                     ),
                     top_p=top_p,
-                    provider=synthesis_provider,
+                    provider=merge_provider,
                     enable_json_repair=enable_json_repair,
                     json_repair_model=json_repair_model,
                 )
@@ -944,7 +1188,10 @@ async def run_refinement_pipeline(
                     resume_checkpoint.refinement_merge_summary = previous_merge_summary
                     resume_checkpoint.updated_at = _now_ts()
 
-            if not (_should_skip("apply") and refinement_round == start_round):
+            if (
+                not skip_editing_round
+                and not (_should_skip("apply") and refinement_round == start_round)
+            ):
                 _set_refinement_phase("apply")
                 if merge_result is None:
                     break
@@ -958,6 +1205,15 @@ async def run_refinement_pipeline(
                 if resume_checkpoint:
                     resume_checkpoint.draft_content = draft_text
                     resume_checkpoint.updated_at = _now_ts()
+
+            if (
+                no_cliches_enabled
+                and not (_should_skip("no_cliches") and refinement_round == start_round)
+            ):
+                await _run_draft_no_cliches(
+                    stage_text=f"第 {refinement_round} 轮",
+                    phase_name="no_cliches",
+                )
 
             remaining = max_refinement_rounds - refinement_round
             if remaining <= 0:
@@ -976,7 +1232,7 @@ async def run_refinement_pipeline(
                     ensure_ascii=False,
                 )
                 clean_analysis, clean_ops = await cleaner.run_text_cleaner(
-                    model=merge_model,
+                    model=text_cleaner_model,
                     query=query,
                     draft_lines_json=draft_lines_json,
                     budget=synthesis_budget,
@@ -984,7 +1240,7 @@ async def run_refinement_pipeline(
                     max_line=len(draft_lines),
                     top_p=top_p,
                     user_system_prompt=system_prompt,
-                    provider=synthesis_provider,
+                    provider=text_cleaner_provider,
                     json_via_prompt=config.json_via_prompt,
                 )
 

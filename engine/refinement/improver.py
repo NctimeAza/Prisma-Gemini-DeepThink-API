@@ -80,6 +80,7 @@ async def run_improver(
             full_content, _, _ = await generate_content(
                 model=model,
                 contents=contents,
+                system_instruction=user_system_prompt or None,
                 temperature=expert_config.temperature,
                 top_p=top_p,
                 thinking_budget=budget,

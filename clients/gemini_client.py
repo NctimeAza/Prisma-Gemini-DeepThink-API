@@ -10,6 +10,7 @@ import logging
 import random
 from typing import Any, AsyncGenerator, Optional
 
+import clients.openai_client as _chat_client
 from google import genai
 from google.genai import types
 
@@ -175,7 +176,7 @@ async def generate_json(
         debug_info["provider"] = provider or LLM_PROVIDER
         debug_info["raw_text"] = raw_text or ""
         debug_info["cleaned_text"] = cleaned or ""
-    return json.loads(cleaned)
+    return _chat_client._parse_json_lenient(cleaned)  # noqa: SLF001
 
 
 async def generate_content(
@@ -405,10 +406,46 @@ def _clean_json_string(s: str) -> str:
     if md_match:
         return md_match.group(1).strip()
 
-    # 提取第一个 { 到最后一个 }
-    first_open = s.find("{")
-    last_close = s.rfind("}")
-    if first_open != -1 and last_close != -1 and last_close > first_open:
-        return s[first_open : last_close + 1]
+    extracted = _extract_first_complete_json_object(s)
+    if extracted:
+        return extracted
 
     return s.strip() if s.strip().startswith("{") else "{}"
+
+
+def _extract_first_complete_json_object(s: str) -> str:
+    """提取文本中的第一个完整 JSON 对象。"""
+    start = s.find("{")
+    if start == -1:
+        return ""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(s)):
+        ch = s[idx]
+
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : idx + 1].strip()
+
+    return ""

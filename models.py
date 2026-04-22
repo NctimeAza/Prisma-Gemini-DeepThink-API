@@ -22,10 +22,12 @@ RefinementPhase = Literal[
     "experts",  # 精修专家并行执行
     "pre_draft_review",  # 初稿前额外审核
     "draft",  # 初稿生成
+    "pre_draft_no_cliches",  # 初稿生成后、首轮审查前的八股清洗
     "review",  # 审查初稿
     "improvers",  # 改进专家并行执行
     "merge",  # 综合助手合并
     "apply",  # 应用精修到初稿
+    "no_cliches",  # 每轮合并后、下一轮审查前的八股清洗
     "cleanup",  # 末端文本清洗（去相邻重复）
     "output",  # 输出最终结果
 ]
@@ -37,6 +39,15 @@ CheckpointStatus = Literal["running", "interrupted", "completed", "error"]
 ExpertContextStatus = Literal["active", "iterated", "deleted"]
 
 
+class ExpertModelProfile(BaseModel):
+    """可供 Manager/Reviewer 选择的专家执行底模档案."""
+
+    id: str
+    model: str
+    provider: str = ""
+    description: str = ""
+
+
 class ExpertConfig(BaseModel):
     """Manager 规划阶段输出的专家配置."""
 
@@ -44,6 +55,9 @@ class ExpertConfig(BaseModel):
     description: str
     temperature: float
     prompt: str
+    expert_model: str = ""
+    execution_model: str = ""
+    execution_provider: str = ""
 
 
 class ExpertResult(BaseModel):
@@ -61,6 +75,9 @@ class ExpertResult(BaseModel):
     round: int = 1
     context_status: ExpertContextStatus = "active"
     context_note: str = ""
+    expert_model: str = ""
+    execution_model: str = ""
+    execution_provider: str = ""
 
 
 class AnalysisResult(BaseModel):
@@ -123,15 +140,35 @@ class DeepThinkConfig(BaseModel):
     # 开启后，在 EXPERT_ENHANCE_COMPLIANCE_RESPONSE 后追加 forced 后缀。
     # 该开关通常由请求模型名的 "-forced" 后缀触发。
     forced_prefill_suffix: bool = False
+    # 可选专家执行底模池，供规划/审查阶段按需求选择。
+    expert_model_pool: list[ExpertModelProfile] = Field(default_factory=list)
+    enable_manager_expert_model_selection: bool = False
+    enable_review_expert_model_selection: bool = False
     # --- 精修流程专用配置 ---
     refinement_max_rounds: int = 2  # 精修迭代轮数
     pre_draft_review_rounds: int = 1  # 初稿前额外审核轮数（0 表示禁用）
     enable_json_repair: bool = False  # 是否启用 JSON 格式修复小模型
     enable_text_cleaner: bool = True  # 是否启用末端文本清洗专家（默认启用）
+    refinement_planner_model: Optional[str] = None  # 精修规划模型
+    refinement_planner_provider: Optional[str] = None  # 精修规划 provider
+    pre_draft_expert_model: Optional[str] = None  # 初稿前专家模型
+    pre_draft_expert_provider: Optional[str] = None  # 初稿前专家 provider
+    pre_draft_review_model: Optional[str] = None  # 初稿前审查模型
+    pre_draft_review_provider: Optional[str] = None  # 初稿前审查 provider
     draft_model: Optional[str] = None  # 初稿生成模型
+    draft_provider: Optional[str] = None  # 初稿生成 provider
     review_model: Optional[str] = None  # 审查阶段模型
+    review_provider: Optional[str] = None  # 审查阶段 provider
+    improver_model: Optional[str] = None  # 改进专家模型
+    improver_provider: Optional[str] = None  # 改进专家 provider
     merge_model: Optional[str] = None  # 综合助手模型
+    merge_provider: Optional[str] = None  # 综合助手 provider
+    text_cleaner_model: Optional[str] = None  # 文本清洗模型
+    text_cleaner_provider: Optional[str] = None  # 文本清洗 provider
     json_repair_model: Optional[str] = None  # JSON 修复模型
+    enable_no_cliches: bool = False  # 是否启用强力杀八股
+    no_cliches_model: Optional[str] = None  # 杀八股模型
+    no_cliches_provider: Optional[str] = None  # 杀八股 provider
 
 
 class DeepThinkCheckpoint(BaseModel):
@@ -152,6 +189,7 @@ class DeepThinkCheckpoint(BaseModel):
     experts: list[ExpertResult] = Field(default_factory=list)
     reviews: list[ReviewResult] = Field(default_factory=list)
 
+    status_content: str = ""
     reasoning_content: str = ""
     output_content: str = ""
 
@@ -183,6 +221,9 @@ class RefinementExpertConfig(BaseModel):
     domain: str  # 严格负责领域
     prompt: str
     temperature: float = 1.0
+    expert_model: str = ""
+    execution_model: str = ""
+    execution_provider: str = ""
     # 运行时注入，规划阶段无需填写
     all_expert_roles: list[str] = Field(default_factory=list)
 

@@ -273,14 +273,11 @@ async def run_text_cleaner(
         except Exception:
             resolved_max_line = 0
 
-    sys_section = ""
-    if user_system_prompt:
-        sys_section = f"\n用户的重要指示：{user_system_prompt}\n"
     context_section = f"对话上下文：\n{context}\n\n" if context else ""
 
     contents = (
         f"{context_section}"
-        f'{sys_section}用户原始需求："{query}"\n\n'
+        f'用户原始需求："{query}"\n\n'
         f"正文按行切分（JSON）：\n{draft_lines_json}"
     )
     prefilled_contents = build_prefill_contents(
@@ -293,7 +290,7 @@ async def run_text_cleaner(
         parsed = await generate_json(
             model=model,
             contents=prefilled_contents,
-            system_instruction="",
+            system_instruction=user_system_prompt or None,
             response_schema=REFINEMENT_CLEANER_SCHEMA,
             thinking_budget=budget,
             temperature=0.2,
